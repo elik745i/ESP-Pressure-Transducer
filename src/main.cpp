@@ -1,16 +1,19 @@
 #include <Arduino.h>
 #include <LittleFS.h>
 #include <ArduinoJson.h>
+#include <DNSServer.h>
 #include <ESP8266WebServer.h>
 #include <ESP8266WiFi.h>
 #include <PubSubClient.h>
 #include <U8g2lib.h>
+#include "web_ui.h"
 
 namespace {
 
 constexpr char CONFIG_PATH[] = "/config.json";
 constexpr uint8_t BUZZER_PIN = D5;
 constexpr uint8_t STATUS_LED_PIN = LED_BUILTIN;
+constexpr uint16_t DNS_PORT = 53;
 constexpr float ADC_PIN_MAX_VOLTAGE = 3.2f;
 constexpr float DIVIDER_R1_KOHM = 10.0f;
 constexpr float DIVIDER_R2_KOHM = 33.0f;
@@ -56,6 +59,7 @@ struct SensorState {
 AppConfig config;
 SensorState sensorState;
 ESP8266WebServer server(80);
+DNSServer dnsServer;
 WiFiClient wifiClient;
 PubSubClient mqttClient(wifiClient);
 U8G2_SSD1306_128X64_NONAME_F_HW_I2C display(U8G2_R0, U8X8_PIN_NONE);
@@ -69,6 +73,7 @@ unsigned long lastAlarmToneMs = 0;
 bool restartRequested = false;
 unsigned long restartAtMs = 0;
 bool mqttDiscoveryPublished = false;
+bool wasWifiConnected = false;
 
 enum class LedPattern {
   Booting,
@@ -90,7 +95,7 @@ String defaultApSsid() {
 void setDefaults() {
   config.deviceName = defaultDeviceName();
   config.apSsid = defaultApSsid();
-  config.apPassword = "configureme";
+  config.apPassword = "12345678";
   config.wifiSsid = "";
   config.wifiPassword = "";
   config.mqttHost = "";
@@ -241,7 +246,22 @@ void beep(uint16_t frequency, uint16_t durationMs) {
   if (!config.buzzerEnabled) {
     return;
   }
+
   tone(BUZZER_PIN, frequency, durationMs);
+  delay(durationMs + 30);
+  noTone(BUZZER_PIN);
+}
+
+void beepImmediate(uint16_t frequency, uint16_t durationMs) {
+  tone(BUZZER_PIN, frequency, durationMs);
+  delay(durationMs + 30);
+  noTone(BUZZER_PIN);
+}
+
+void playTonePair(uint16_t firstFrequency, uint16_t secondFrequency, uint16_t durationMs, uint16_t gapMs) {
+  beep(firstFrequency, durationMs);
+  delay(gapMs);
+  beep(secondFrequency, durationMs);
 }
 
 void setStatusLed(bool on) {
@@ -300,10 +320,55 @@ void scheduleRestart(unsigned long delayMs) {
   restartAtMs = millis() + delayMs;
 }
 
+bool isIpAddress(const String &value) {
+  for (size_t index = 0; index < value.length(); ++index) {
+    const char ch = value.charAt(index);
+    if ((ch < '0' || ch > '9') && ch != '.') {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool captivePortalRedirect() {
+  const String host = server.hostHeader();
+  if (host.isEmpty() || isIpAddress(host) || host == WiFi.softAPIP().toString()) {
+    return false;
+  }
+
+  server.sendHeader("Location", String("http://") + WiFi.softAPIP().toString(), true);
+  server.send(302, "text/plain", "");
+  return true;
+}
+
+void sendConfigPage() {
+  if (captivePortalRedirect()) {
+    return;
+  }
+
+  File file = LittleFS.open("/index.html.gz", "r");
+  if (file) {
+    server.sendHeader("Content-Encoding", "gzip");
+    server.streamFile(file, "text/html");
+    file.close();
+    return;
+  }
+
+  file = LittleFS.open("/index.html", "r");
+  if (file) {
+    server.streamFile(file, "text/html");
+    file.close();
+    return;
+  }
+
+  server.send_P(200, "text/html", INDEX_HTML);
+}
+
 void connectWifi() {
   WiFi.mode(WIFI_AP_STA);
   WiFi.hostname(config.deviceName.c_str());
   WiFi.softAP(config.apSsid.c_str(), config.apPassword.c_str());
+  dnsServer.start(DNS_PORT, "*", WiFi.softAPIP());
 
   if (!config.wifiSsid.isEmpty()) {
     WiFi.begin(config.wifiSsid.c_str(), config.wifiPassword.c_str());
@@ -436,11 +501,11 @@ void drawDisplay() {
   display.print(ipText);
 
   display.setFont(u8g2_font_logisoso24_tf);
-  display.setCursor(0, 38);
+  display.setCursor(0, 41);
   display.print(sensorState.pressureBar, 2);
 
   display.setFont(u8g2_font_6x13_tf);
-  display.setCursor(96, 38);
+  display.setCursor(96, 41);
   display.print("bar");
 
   display.setCursor(0, 64);
@@ -494,6 +559,26 @@ void sendStatus() {
   doc["pressureBar"] = serialized(String(sensorState.pressureBar, 2));
   doc["alarmActive"] = sensorState.alarmActive;
   doc["uptimeSeconds"] = millis() / 1000;
+
+  String payload;
+  serializeJson(doc, payload);
+  server.send(200, "application/json", payload);
+}
+
+void sendWifiScanResults() {
+  JsonDocument doc;
+  JsonArray networks = doc["networks"].to<JsonArray>();
+
+  const int networkCount = WiFi.scanNetworks(false, true);
+  if (networkCount >= 0) {
+    for (int index = 0; index < networkCount; ++index) {
+      JsonObject network = networks.add<JsonObject>();
+      network["ssid"] = WiFi.SSID(index);
+      network["rssi"] = WiFi.RSSI(index);
+      network["encrypted"] = WiFi.encryptionType(index) != ENC_TYPE_NONE;
+    }
+    WiFi.scanDelete();
+  }
 
   String payload;
   serializeJson(doc, payload);
@@ -577,23 +662,32 @@ void handleRestartPost() {
 }
 
 void handleNotFound() {
+  if (captivePortalRedirect()) {
+    return;
+  }
+
+  if (server.method() == HTTP_GET) {
+    sendConfigPage();
+    return;
+  }
+
   server.send(404, "application/json", "{\"error\":\"Not found\"}");
 }
 
 void configureWebServer() {
-  server.on("/", HTTP_GET, []() {
-    File file = LittleFS.open("/index.html", "r");
-    if (!file) {
-      server.send(500, "text/plain", "Missing /index.html in LittleFS");
-      return;
-    }
-    server.streamFile(file, "text/html");
-    file.close();
-  });
+  server.on("/", HTTP_GET, sendConfigPage);
+  server.on("/hotspot-detect.html", HTTP_GET, sendConfigPage);
+  server.on("/generate_204", HTTP_GET, sendConfigPage);
+  server.on("/gen_204", HTTP_GET, sendConfigPage);
+  server.on("/connecttest.txt", HTTP_GET, sendConfigPage);
+  server.on("/ncsi.txt", HTTP_GET, sendConfigPage);
+  server.on("/success.txt", HTTP_GET, sendConfigPage);
+  server.on("/library/test/success.html", HTTP_GET, sendConfigPage);
 
   server.on("/api/config", HTTP_GET, sendJsonConfig);
   server.on("/api/config", HTTP_POST, handleConfigPost);
   server.on("/api/status", HTTP_GET, sendStatus);
+  server.on("/api/wifi/scan", HTTP_GET, sendWifiScanResults);
   server.on("/api/restart", HTTP_POST, handleRestartPost);
   server.onNotFound(handleNotFound);
   server.begin();
@@ -607,7 +701,7 @@ void setupApp() {
 
   Serial.begin(115200);
   delay(100);
-  beep(1800, 80);
+  beepImmediate(2200, 40);
 
   if (!LittleFS.begin()) {
     Serial.println("LittleFS mount failed");
@@ -633,10 +727,19 @@ void setupApp() {
 }
 
 void loopApp() {
+  dnsServer.processNextRequest();
   server.handleClient();
 
   const unsigned long now = millis();
+  const bool wifiConnected = WiFi.isConnected();
   updateStatusLed(now);
+
+  if (wifiConnected && !wasWifiConnected) {
+    playTonePair(1800, 2400, 120, 90);
+  } else if (!wifiConnected && wasWifiConnected) {
+    playTonePair(2600, 1500, 120, 90);
+  }
+  wasWifiConnected = wifiConnected;
 
   if (now - lastSensorSampleMs >= SENSOR_SAMPLE_INTERVAL_MS) {
     lastSensorSampleMs = now;
@@ -648,13 +751,13 @@ void loopApp() {
     drawDisplay();
   }
 
-  if (!WiFi.isConnected() && !config.wifiSsid.isEmpty() && now - lastWifiReconnectAttemptMs >= WIFI_RECONNECT_INTERVAL_MS) {
+  if (!wifiConnected && !config.wifiSsid.isEmpty() && now - lastWifiReconnectAttemptMs >= WIFI_RECONNECT_INTERVAL_MS) {
     lastWifiReconnectAttemptMs = now;
     WiFi.disconnect();
     WiFi.begin(config.wifiSsid.c_str(), config.wifiPassword.c_str());
   }
 
-  if (WiFi.isConnected() && config.mqttEnabled) {
+  if (wifiConnected && config.mqttEnabled) {
     if (!mqttClient.connected() && now - lastMqttReconnectAttemptMs >= MQTT_RECONNECT_INTERVAL_MS) {
       lastMqttReconnectAttemptMs = now;
       connectMqtt();

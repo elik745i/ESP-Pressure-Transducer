@@ -1,3 +1,8 @@
+#pragma once
+
+namespace {
+
+const char INDEX_HTML[] PROGMEM = R"rawliteral(
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -670,3 +675,7 @@
   </script>
 </body>
 </html>
+
+)rawliteral";
+
+}  // namespace

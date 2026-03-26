@@ -3,8 +3,9 @@
 PlatformIO project for a Wemos D1 mini (ESP8266) pressure monitor with:
 
 - 0.96 inch I2C OLED status display
-- web configuration page stored in LittleFS
+- web configuration page with in-firmware fallback if LittleFS content is missing
 - Wi-Fi station mode plus fallback configuration access point
+- captive portal behavior for easier AP setup on phones and laptops
 - MQTT publishing for Home Assistant
 - buzzer alarm for high pressure
 
@@ -61,8 +62,8 @@ That is slightly above the usual safe `3.2 V` limit of a D1 mini A0 pin. If your
 2. Install the recommended extension: `PlatformIO IDE`.
 3. Connect the Wemos D1 mini by USB.
 4. In PlatformIO:
-   1. Run `Upload Filesystem Image` first. This uploads [data/index.html](data/index.html).
-   2. Run `Upload` to flash the firmware.
+   1. Run `Upload` to flash the firmware.
+   2. Optionally run `Upload Filesystem Image` to store [data/index.html](data/index.html) in LittleFS too.
    3. Open `Monitor` at `115200` baud if needed.
 
 You can also use the PlatformIO toolbar buttons in the VS Code status bar.
@@ -79,16 +80,26 @@ If the PlatformIO status bar buttons are not visible, use VS Code task buttons i
 
 These tasks are defined in [.vscode/tasks.json](.vscode/tasks.json) so the project remains easy to build and upload from the VS Code interface.
 
+## Flashing Troubleshooting
+
+If flashing fails or the CH340/CH341 serial adapter is not detected correctly on Windows, try installing the older CH341 driver included in this repository:
+
+- [CH341SER/CH341SER.EXE](CH341SER/CH341SER.EXE)
+
+The driver files are stored in the [CH341SER](CH341SER) folder in this git repository.
+
 ## First Boot
 
 On first boot the device creates an access point:
 
 - SSID: `PressureConfig-<chipid>`
-- Password: `configureme`
+- Password: `12345678`
 
 Open:
 
 - `http://192.168.4.1`
+
+Many phones and laptops should also open the configuration page automatically through captive portal detection while connected to the device AP.
 
 Set:
 
@@ -147,6 +158,6 @@ The repository already includes a GitHub Actions workflow that builds the Platfo
 ## Notes
 
 - Wi-Fi and MQTT settings are stored in LittleFS at `/config.json`.
-- The web UI is stored separately in LittleFS as [data/index.html](data/index.html).
+- The web UI is compiled into firmware and can also be stored separately in LittleFS as [data/index.html](data/index.html).
 - The OLED shows live pressure, Wi-Fi state, and MQTT state.
 - The built-in LED uses different blink patterns for boot, AP-only mode, Wi-Fi connection attempts, Wi-Fi connected, MQTT connected, and restart pending.
