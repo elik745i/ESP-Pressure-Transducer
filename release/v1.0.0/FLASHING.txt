@@ -1,0 +1,16 @@
+ESP Pressure Transducer v1.0.0
+
+Flash these files with an ESP8266 flash tool:
+
+1. firmware.bin  -> 0x000000
+2. littlefs.bin  -> 0x300000
+
+Board/layout:
+- Wemos D1 mini / ESP8266
+- Flash layout: 4M1M
+- Filesystem: LittleFS
+
+Notes:
+- This project uses ESP8266 combined firmware.bin plus a separate LittleFS image.
+- Unlike many ESP32 projects, this release does not require the 4-bin bootloader/partition scheme.
+- After flashing littlefs.bin, the web UI files will be available from LittleFS.

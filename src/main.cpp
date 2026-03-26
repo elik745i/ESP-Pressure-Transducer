@@ -40,11 +40,16 @@ struct AppConfig {
   float sensorMinVoltage;
   float sensorMaxVoltage;
   float sensorMaxPressureKPa;
+  String sensorFilterPreset;
   float buzzerAlarmThresholdKPa;
   bool buzzerEnabled;
   uint32_t publishIntervalSeconds;
   uint8_t oledContrast;
   bool oledFlip;
+  String oledPressureUnit;
+  String oledTopRowMode;
+  String oledBottomRowMode;
+  int8_t oledValueYOffset;
 };
 
 struct SensorState {
@@ -74,6 +79,8 @@ bool restartRequested = false;
 unsigned long restartAtMs = 0;
 bool mqttDiscoveryPublished = false;
 bool wasWifiConnected = false;
+bool wasMqttConnected = false;
+bool accessPointEnabled = false;
 
 enum class LedPattern {
   Booting,
@@ -109,11 +116,16 @@ void setDefaults() {
   config.sensorMinVoltage = 0.5f;
   config.sensorMaxVoltage = 4.5f;
   config.sensorMaxPressureKPa = 1200.0f;
+  config.sensorFilterPreset = "none";
   config.buzzerAlarmThresholdKPa = 1100.0f;
   config.buzzerEnabled = true;
   config.publishIntervalSeconds = 15;
   config.oledContrast = 200;
   config.oledFlip = false;
+  config.oledPressureUnit = "bar";
+  config.oledTopRowMode = "ip";
+  config.oledBottomRowMode = "mqtt";
+  config.oledValueYOffset = 3;
 }
 
 bool saveConfig() {
@@ -134,11 +146,16 @@ bool saveConfig() {
   doc["sensorMinVoltage"] = config.sensorMinVoltage;
   doc["sensorMaxVoltage"] = config.sensorMaxVoltage;
   doc["sensorMaxPressureKPa"] = config.sensorMaxPressureKPa;
+  doc["sensorFilterPreset"] = config.sensorFilterPreset;
   doc["buzzerAlarmThresholdKPa"] = config.buzzerAlarmThresholdKPa;
   doc["buzzerEnabled"] = config.buzzerEnabled;
   doc["publishIntervalSeconds"] = config.publishIntervalSeconds;
   doc["oledContrast"] = config.oledContrast;
   doc["oledFlip"] = config.oledFlip;
+  doc["oledPressureUnit"] = config.oledPressureUnit;
+  doc["oledTopRowMode"] = config.oledTopRowMode;
+  doc["oledBottomRowMode"] = config.oledBottomRowMode;
+  doc["oledValueYOffset"] = config.oledValueYOffset;
 
   File file = LittleFS.open(CONFIG_PATH, "w");
   if (!file) {
@@ -185,11 +202,16 @@ bool loadConfig() {
   config.sensorMinVoltage = doc["sensorMinVoltage"] | config.sensorMinVoltage;
   config.sensorMaxVoltage = doc["sensorMaxVoltage"] | config.sensorMaxVoltage;
   config.sensorMaxPressureKPa = doc["sensorMaxPressureKPa"] | config.sensorMaxPressureKPa;
+  config.sensorFilterPreset = doc["sensorFilterPreset"] | config.sensorFilterPreset;
   config.buzzerAlarmThresholdKPa = doc["buzzerAlarmThresholdKPa"] | config.buzzerAlarmThresholdKPa;
   config.buzzerEnabled = doc["buzzerEnabled"] | config.buzzerEnabled;
   config.publishIntervalSeconds = doc["publishIntervalSeconds"] | config.publishIntervalSeconds;
   config.oledContrast = doc["oledContrast"] | config.oledContrast;
   config.oledFlip = doc["oledFlip"] | config.oledFlip;
+  config.oledPressureUnit = doc["oledPressureUnit"] | config.oledPressureUnit;
+  config.oledTopRowMode = doc["oledTopRowMode"] | config.oledTopRowMode;
+  config.oledBottomRowMode = doc["oledBottomRowMode"] | config.oledBottomRowMode;
+  config.oledValueYOffset = doc["oledValueYOffset"] | config.oledValueYOffset;
   return true;
 }
 
@@ -200,6 +222,92 @@ void applyDisplaySettings() {
 
 String localIpString() {
   return WiFi.isConnected() ? WiFi.localIP().toString() : String("not connected");
+}
+
+String devicePageUrl() {
+  if (WiFi.isConnected()) {
+    return String("http://") + WiFi.localIP().toString();
+  }
+  if (accessPointEnabled) {
+    return String("http://") + WiFi.softAPIP().toString();
+  }
+  return "";
+}
+
+float displayedPressureValue() {
+  if (config.oledPressureUnit == "psi") {
+    return sensorState.pressureKPa * 0.1450377f;
+  }
+  if (config.oledPressureUnit == "mpa") {
+    return sensorState.pressureKPa / 1000.0f;
+  }
+  return sensorState.pressureBar;
+}
+
+uint8_t displayedPressureDecimals() {
+  if (config.oledPressureUnit == "psi") {
+    return 1;
+  }
+  if (config.oledPressureUnit == "mpa") {
+    return 3;
+  }
+  return 2;
+}
+
+String displayedPressureLabel() {
+  if (config.oledPressureUnit == "psi") {
+    return "psi";
+  }
+  if (config.oledPressureUnit == "mpa") {
+    return "MPa";
+  }
+  return "bar";
+}
+
+String oledTopRowText() {
+  if (config.oledTopRowMode == "wifi") {
+    return WiFi.isConnected() ? String("WiFi ") + WiFi.SSID() : String("AP ") + config.apSsid;
+  }
+  if (config.oledTopRowMode == "device") {
+    return config.deviceName;
+  }
+  if (config.oledTopRowMode == "topic") {
+    return config.mqttBaseTopic;
+  }
+  return String(WiFi.isConnected() ? "IP " : "AP ") +
+         (WiFi.isConnected() ? WiFi.localIP().toString() : WiFi.softAPIP().toString());
+}
+
+String oledBottomRowText() {
+  if (config.oledBottomRowMode == "blank") {
+    return "";
+  }
+  if (config.oledBottomRowMode == "wifi") {
+    return WiFi.isConnected() ? String("WiFi ") + WiFi.SSID() : "WiFi offline";
+  }
+  if (config.oledBottomRowMode == "kpa") {
+    return String(sensorState.pressureKPa, 1) + " kPa";
+  }
+  if (config.oledBottomRowMode == "raw") {
+    return String("ADC ") + sensorState.rawAdc;
+  }
+  return mqttClient.connected() ? "MQTT online" : "MQTT offline";
+}
+
+float sensorFilterAlpha() {
+  if (config.sensorFilterPreset == "none") {
+    return 1.0f;
+  }
+  if (config.sensorFilterPreset == "light") {
+    return 0.55f;
+  }
+  if (config.sensorFilterPreset == "hard") {
+    return 0.18f;
+  }
+  if (config.sensorFilterPreset == "strong") {
+    return 0.10f;
+  }
+  return 0.30f;
 }
 
 String mqttClientId() {
@@ -258,10 +366,50 @@ void beepImmediate(uint16_t frequency, uint16_t durationMs) {
   noTone(BUZZER_PIN);
 }
 
-void playTonePair(uint16_t firstFrequency, uint16_t secondFrequency, uint16_t durationMs, uint16_t gapMs) {
-  beep(firstFrequency, durationMs);
-  delay(gapMs);
-  beep(secondFrequency, durationMs);
+void playMelody(const uint16_t *frequencies, const uint16_t *durations, size_t noteCount, bool honorMute) {
+  if (honorMute && !config.buzzerEnabled) {
+    return;
+  }
+
+  for (size_t index = 0; index < noteCount; ++index) {
+    const uint16_t frequency = frequencies[index];
+    const uint16_t duration = durations[index];
+
+    if (frequency == 0) {
+      delay(duration);
+      continue;
+    }
+
+    if (honorMute) {
+      beep(frequency, duration);
+    } else {
+      beepImmediate(frequency, duration);
+    }
+  }
+}
+
+void playBootMelody() {
+  constexpr uint16_t frequencies[] = {1960, 2470, 2940};
+  constexpr uint16_t durations[] = {90, 90, 140};
+  playMelody(frequencies, durations, 3, false);
+}
+
+void playWifiConnectedMelody() {
+  constexpr uint16_t frequencies[] = {1760, 2200, 2620};
+  constexpr uint16_t durations[] = {90, 90, 130};
+  playMelody(frequencies, durations, 3, true);
+}
+
+void playWifiDisconnectedMelody() {
+  constexpr uint16_t frequencies[] = {2620, 1960, 1470};
+  constexpr uint16_t durations[] = {100, 100, 140};
+  playMelody(frequencies, durations, 3, true);
+}
+
+void playMqttConnectedMelody() {
+  constexpr uint16_t frequencies[] = {1560, 2080, 1560, 3120};
+  constexpr uint16_t durations[] = {70, 70, 70, 150};
+  playMelody(frequencies, durations, 4, true);
 }
 
 void setStatusLed(bool on) {
@@ -320,6 +468,26 @@ void scheduleRestart(unsigned long delayMs) {
   restartAtMs = millis() + delayMs;
 }
 
+void startAccessPoint() {
+  if (accessPointEnabled) {
+    return;
+  }
+
+  WiFi.softAP(config.apSsid.c_str(), config.apPassword.c_str());
+  dnsServer.start(DNS_PORT, "*", WiFi.softAPIP());
+  accessPointEnabled = true;
+}
+
+void stopAccessPoint() {
+  if (!accessPointEnabled) {
+    return;
+  }
+
+  dnsServer.stop();
+  WiFi.softAPdisconnect(true);
+  accessPointEnabled = false;
+}
+
 bool isIpAddress(const String &value) {
   for (size_t index = 0; index < value.length(); ++index) {
     const char ch = value.charAt(index);
@@ -367,8 +535,7 @@ void sendConfigPage() {
 void connectWifi() {
   WiFi.mode(WIFI_AP_STA);
   WiFi.hostname(config.deviceName.c_str());
-  WiFi.softAP(config.apSsid.c_str(), config.apPassword.c_str());
-  dnsServer.start(DNS_PORT, "*", WiFi.softAPIP());
+  startAccessPoint();
 
   if (!config.wifiSsid.isEmpty()) {
     WiFi.begin(config.wifiSsid.c_str(), config.wifiPassword.c_str());
@@ -389,9 +556,9 @@ void publishDiscovery() {
   pressureDoc["uniq_id"] = uniqueIdBase() + "_pressure";
   pressureDoc["stat_t"] = stateTopic();
   pressureDoc["avty_t"] = availabilityTopic();
-  pressureDoc["unit_of_meas"] = "kPa";
+  pressureDoc["unit_of_meas"] = "bar";
   pressureDoc["dev_cla"] = "pressure";
-  pressureDoc["val_tpl"] = "{{ value_json.pressure_kpa }}";
+  pressureDoc["val_tpl"] = "{{ value_json.pressure_bar }}";
   pressureDoc["exp_aft"] = config.publishIntervalSeconds * 3;
   fillDiscoveryDevice(pressureDoc["dev"].to<JsonObject>());
 
@@ -445,7 +612,6 @@ bool connectMqtt() {
   if (connected) {
     mqttPublish(availabilityTopic(), "online", true);
     publishDiscovery();
-    beep(2600, 80);
   }
 
   return connected;
@@ -458,13 +624,19 @@ void sampleSensor() {
     delay(2);
   }
 
-  sensorState.rawAdc = total / 8;
-  sensorState.a0Voltage = static_cast<float>(sensorState.rawAdc) * ADC_PIN_MAX_VOLTAGE / 1023.0f;
-  sensorState.sensorVoltage = sensorState.a0Voltage * ((DIVIDER_R1_KOHM + DIVIDER_R2_KOHM) / DIVIDER_R2_KOHM);
+  const uint16_t rawAdc = total / 8;
+  const float a0Voltage = static_cast<float>(rawAdc) * ADC_PIN_MAX_VOLTAGE / 1023.0f;
+  const float sensorVoltage = a0Voltage * ((DIVIDER_R1_KOHM + DIVIDER_R2_KOHM) / DIVIDER_R2_KOHM);
+  const float alpha = sensorFilterAlpha();
+
+  sensorState.rawAdc = rawAdc;
+  sensorState.a0Voltage += alpha * (a0Voltage - sensorState.a0Voltage);
+  sensorState.sensorVoltage += alpha * (sensorVoltage - sensorState.sensorVoltage);
 
   const float normalized = (sensorState.sensorVoltage - config.sensorMinVoltage) /
                            (config.sensorMaxVoltage - config.sensorMinVoltage);
-  sensorState.pressureKPa = clampFloat(normalized, 0.0f, 1.0f) * config.sensorMaxPressureKPa;
+  const float pressureKPa = clampFloat(normalized, 0.0f, 1.0f) * config.sensorMaxPressureKPa;
+  sensorState.pressureKPa += alpha * (pressureKPa - sensorState.pressureKPa);
   sensorState.pressureBar = sensorState.pressureKPa / 100.0f;
   sensorState.alarmActive = config.buzzerEnabled && sensorState.pressureKPa >= config.buzzerAlarmThresholdKPa;
 }
@@ -476,13 +648,14 @@ void publishState() {
 
   JsonDocument doc;
   doc["device_name"] = config.deviceName;
-  doc["pressure_kpa"] = serialized(String(sensorState.pressureKPa, 1));
   doc["pressure_bar"] = serialized(String(sensorState.pressureBar, 2));
+  doc["pressure_kpa"] = serialized(String(sensorState.pressureKPa, 1));
   doc["sensor_voltage"] = serialized(String(sensorState.sensorVoltage, 3));
   doc["a0_voltage"] = serialized(String(sensorState.a0Voltage, 3));
   doc["raw_adc"] = sensorState.rawAdc;
   doc["wifi_rssi"] = WiFi.isConnected() ? WiFi.RSSI() : 0;
   doc["ip"] = localIpString();
+  doc["ui_url"] = devicePageUrl();
   doc["alarm"] = sensorState.alarmActive;
   doc["uptime_seconds"] = millis() / 1000;
 
@@ -492,24 +665,24 @@ void publishState() {
 }
 
 void drawDisplay() {
-  const String ipText = WiFi.isConnected() ? WiFi.localIP().toString() : WiFi.softAPIP().toString();
+  const int pressureBaseline = 38 + config.oledValueYOffset;
+  const String pressureLabel = displayedPressureLabel();
 
   display.clearBuffer();
   display.setFont(u8g2_font_6x13_tf);
   display.setCursor(0, 11);
-  display.print(WiFi.isConnected() ? "IP " : "AP ");
-  display.print(ipText);
+  display.print(oledTopRowText());
 
   display.setFont(u8g2_font_logisoso24_tf);
-  display.setCursor(0, 41);
-  display.print(sensorState.pressureBar, 2);
+  display.setCursor(0, pressureBaseline);
+  display.print(displayedPressureValue(), displayedPressureDecimals());
 
   display.setFont(u8g2_font_6x13_tf);
-  display.setCursor(96, 41);
-  display.print("bar");
+  display.setCursor(96, pressureBaseline);
+  display.print(pressureLabel);
 
   display.setCursor(0, 64);
-  display.print(mqttClient.connected() ? "MQTT online" : "MQTT offline");
+  display.print(oledBottomRowText());
   display.sendBuffer();
 }
 
@@ -531,11 +704,16 @@ void sendJsonConfig() {
   doc["sensorMinVoltage"] = config.sensorMinVoltage;
   doc["sensorMaxVoltage"] = config.sensorMaxVoltage;
   doc["sensorMaxPressureKPa"] = config.sensorMaxPressureKPa;
+  doc["sensorFilterPreset"] = config.sensorFilterPreset;
   doc["buzzerAlarmThresholdKPa"] = config.buzzerAlarmThresholdKPa;
   doc["buzzerEnabled"] = config.buzzerEnabled;
   doc["publishIntervalSeconds"] = config.publishIntervalSeconds;
   doc["oledContrast"] = config.oledContrast;
   doc["oledFlip"] = config.oledFlip;
+  doc["oledPressureUnit"] = config.oledPressureUnit;
+  doc["oledTopRowMode"] = config.oledTopRowMode;
+  doc["oledBottomRowMode"] = config.oledBottomRowMode;
+  doc["oledValueYOffset"] = config.oledValueYOffset;
 
   String payload;
   serializeJson(doc, payload);
@@ -609,11 +787,16 @@ bool updateConfigFromRequest() {
   config.sensorMinVoltage = doc["sensorMinVoltage"] | config.sensorMinVoltage;
   config.sensorMaxVoltage = doc["sensorMaxVoltage"] | config.sensorMaxVoltage;
   config.sensorMaxPressureKPa = doc["sensorMaxPressureKPa"] | config.sensorMaxPressureKPa;
+  config.sensorFilterPreset = String(static_cast<const char *>(doc["sensorFilterPreset"] | config.sensorFilterPreset.c_str()));
   config.buzzerAlarmThresholdKPa = doc["buzzerAlarmThresholdKPa"] | config.buzzerAlarmThresholdKPa;
   config.buzzerEnabled = doc["buzzerEnabled"] | config.buzzerEnabled;
   config.publishIntervalSeconds = doc["publishIntervalSeconds"] | config.publishIntervalSeconds;
   config.oledContrast = doc["oledContrast"] | config.oledContrast;
   config.oledFlip = doc["oledFlip"] | config.oledFlip;
+  config.oledPressureUnit = String(static_cast<const char *>(doc["oledPressureUnit"] | config.oledPressureUnit.c_str()));
+  config.oledTopRowMode = String(static_cast<const char *>(doc["oledTopRowMode"] | config.oledTopRowMode.c_str()));
+  config.oledBottomRowMode = String(static_cast<const char *>(doc["oledBottomRowMode"] | config.oledBottomRowMode.c_str()));
+  config.oledValueYOffset = doc["oledValueYOffset"] | config.oledValueYOffset;
 
   if (config.apPassword.length() < 8) {
     server.send(400, "application/json", "{\"error\":\"AP password must be at least 8 characters\"}");
@@ -632,9 +815,36 @@ bool updateConfigFromRequest() {
     config.oledContrast = 255;
   }
 
+  if (config.oledValueYOffset < -12) {
+    config.oledValueYOffset = -12;
+  } else if (config.oledValueYOffset > 12) {
+    config.oledValueYOffset = 12;
+  }
+
+  if (config.oledPressureUnit != "bar" && config.oledPressureUnit != "psi" && config.oledPressureUnit != "mpa") {
+    config.oledPressureUnit = "bar";
+  }
+
+  if (config.oledTopRowMode != "ip" && config.oledTopRowMode != "wifi" &&
+      config.oledTopRowMode != "device" && config.oledTopRowMode != "topic") {
+    config.oledTopRowMode = "ip";
+  }
+
+  if (config.oledBottomRowMode != "mqtt" && config.oledBottomRowMode != "wifi" &&
+      config.oledBottomRowMode != "kpa" && config.oledBottomRowMode != "raw" &&
+      config.oledBottomRowMode != "blank") {
+    config.oledBottomRowMode = "mqtt";
+  }
+
   if (config.sensorMaxVoltage <= config.sensorMinVoltage) {
     server.send(400, "application/json", "{\"error\":\"Sensor max voltage must be greater than min voltage\"}");
     return false;
+  }
+
+  if (config.sensorFilterPreset != "none" && config.sensorFilterPreset != "light" &&
+      config.sensorFilterPreset != "soft" &&
+      config.sensorFilterPreset != "hard" && config.sensorFilterPreset != "strong") {
+    config.sensorFilterPreset = "none";
   }
 
   if (!saveConfig()) {
@@ -701,7 +911,7 @@ void setupApp() {
 
   Serial.begin(115200);
   delay(100);
-  beepImmediate(2200, 40);
+  playBootMelody();
 
   if (!LittleFS.begin()) {
     Serial.println("LittleFS mount failed");
@@ -727,19 +937,29 @@ void setupApp() {
 }
 
 void loopApp() {
-  dnsServer.processNextRequest();
+  if (accessPointEnabled) {
+    dnsServer.processNextRequest();
+  }
   server.handleClient();
 
   const unsigned long now = millis();
   const bool wifiConnected = WiFi.isConnected();
+  const bool mqttConnected = mqttClient.connected();
   updateStatusLed(now);
 
   if (wifiConnected && !wasWifiConnected) {
-    playTonePair(1800, 2400, 120, 90);
+    stopAccessPoint();
+    playWifiConnectedMelody();
   } else if (!wifiConnected && wasWifiConnected) {
-    playTonePair(2600, 1500, 120, 90);
+    startAccessPoint();
+    playWifiDisconnectedMelody();
   }
   wasWifiConnected = wifiConnected;
+
+  if (mqttConnected && !wasMqttConnected) {
+    playMqttConnectedMelody();
+  }
+  wasMqttConnected = mqttConnected;
 
   if (now - lastSensorSampleMs >= SENSOR_SAMPLE_INTERVAL_MS) {
     lastSensorSampleMs = now;
@@ -765,7 +985,7 @@ void loopApp() {
     mqttClient.loop();
   }
 
-  if (mqttClient.connected() && now - lastPublishMs >= config.publishIntervalSeconds * 1000UL) {
+  if (mqttConnected && now - lastPublishMs >= config.publishIntervalSeconds * 1000UL) {
     lastPublishMs = now;
     publishState();
   }

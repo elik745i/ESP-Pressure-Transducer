@@ -139,6 +139,88 @@
       min-height: 42px;
     }
 
+    .password-field {
+      position: relative;
+    }
+
+    .password-field input {
+      padding-right: 52px;
+    }
+
+    .password-toggle {
+      position: absolute;
+      top: 50%;
+      right: 8px;
+      width: 36px;
+      height: 36px;
+      padding: 0;
+      border-radius: 999px;
+      border: 1px solid #d5d5d5;
+      background: #f7f7f7;
+      color: #555555;
+      transform: translateY(-50%);
+      transition: transform 180ms ease, background-color 180ms ease, border-color 180ms ease, color 180ms ease;
+    }
+
+    .password-toggle:hover {
+      background: #fff4df;
+      border-color: #cf8400;
+      transform: translateY(-50%) scale(1.05);
+    }
+
+    .eye-icon {
+      position: relative;
+      display: block;
+      width: 18px;
+      height: 12px;
+      margin: 0 auto;
+      border: 2px solid currentColor;
+      border-radius: 12px / 8px;
+      transition: transform 180ms ease;
+    }
+
+    .eye-icon::before {
+      content: "";
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      width: 4px;
+      height: 4px;
+      border-radius: 50%;
+      background: currentColor;
+      transform: translate(-50%, -50%);
+    }
+
+    .eye-icon::after {
+      content: "";
+      position: absolute;
+      top: -4px;
+      left: 7px;
+      width: 2px;
+      height: 18px;
+      background: currentColor;
+      border-radius: 999px;
+      transform: rotate(35deg) scaleY(0);
+      transform-origin: center;
+      opacity: 0;
+      transition: transform 180ms ease, opacity 180ms ease;
+    }
+
+    .password-toggle.revealed {
+      background: #fff4df;
+      border-color: #cf8400;
+      color: #b36d00;
+    }
+
+    .password-toggle.revealed .eye-icon {
+      transform: scale(1.05);
+    }
+
+    .password-toggle.revealed .eye-icon::after {
+      transform: rotate(35deg) scaleY(1);
+      opacity: 1;
+    }
+
     input[type="checkbox"] {
       width: 18px;
       height: 18px;
@@ -371,7 +453,12 @@
                 <input id="wifiSsid" autocomplete="off">
               </label>
               <label>Wi-Fi Password
-                <input id="wifiPassword" type="password" autocomplete="new-password">
+                <div class="password-field">
+                  <input id="wifiPassword" type="password" autocomplete="new-password">
+                  <button class="password-toggle" type="button" data-target="wifiPassword" aria-label="Show Wi-Fi password">
+                    <span class="eye-icon" aria-hidden="true"></span>
+                  </button>
+                </div>
               </label>
             </div>
             <div class="inline-actions">
@@ -388,7 +475,12 @@
                 <input id="apSsid" autocomplete="off">
               </label>
               <label>Access Point Password
-                <input id="apPassword" type="password" autocomplete="new-password">
+                <div class="password-field">
+                  <input id="apPassword" type="password" autocomplete="new-password">
+                  <button class="password-toggle" type="button" data-target="apPassword" aria-label="Show access point password">
+                    <span class="eye-icon" aria-hidden="true"></span>
+                  </button>
+                </div>
               </label>
             </div>
           </form>
@@ -414,7 +506,12 @@
                 <input id="mqttUser" autocomplete="off">
               </label>
               <label>MQTT Password
-                <input id="mqttPassword" type="password" autocomplete="new-password">
+                <div class="password-field">
+                  <input id="mqttPassword" type="password" autocomplete="new-password">
+                  <button class="password-toggle" type="button" data-target="mqttPassword" aria-label="Show MQTT password">
+                    <span class="eye-icon" aria-hidden="true"></span>
+                  </button>
+                </div>
               </label>
             </div>
             <label>Base Topic
@@ -452,6 +549,17 @@
               </label>
               <label class="check"><input id="buzzerEnabled" type="checkbox"> Enable buzzer alarm</label>
             </div>
+            <div class="row">
+              <label>Sensor Filter
+                <select id="sensorFilterPreset">
+                  <option value="none">None</option>
+                  <option value="light">Light</option>
+                  <option value="soft">Soft</option>
+                  <option value="hard">Hard</option>
+                  <option value="strong">Strong</option>
+                </select>
+              </label>
+            </div>
           </form>
         </div>
 
@@ -459,12 +567,43 @@
           <h2>OLED Configuration</h2>
           <form id="oledForm">
             <div class="row">
+              <label>Display Unit
+                <select id="oledPressureUnit">
+                  <option value="bar">bar</option>
+                  <option value="psi">PSI</option>
+                  <option value="mpa">MPa</option>
+                </select>
+              </label>
               <label>OLED Contrast
                 <input id="oledContrast" type="number" min="1" max="255">
               </label>
               <label class="check"><input id="oledFlip" type="checkbox"> Rotate OLED 180°</label>
             </div>
-            <p class="note">Current layout is fixed to top IP, large center pressure in bar, and MQTT status on the bottom line.</p>
+            <div class="row">
+              <label>Top Row
+                <select id="oledTopRowMode">
+                  <option value="ip">IP / AP IP</option>
+                  <option value="wifi">Wi-Fi / AP name</option>
+                  <option value="device">Device name</option>
+                  <option value="topic">MQTT topic</option>
+                </select>
+              </label>
+              <label>Bottom Row
+                <select id="oledBottomRowMode">
+                  <option value="mqtt">MQTT status</option>
+                  <option value="wifi">Wi-Fi status</option>
+                  <option value="kpa">Pressure in kPa</option>
+                  <option value="raw">Raw ADC</option>
+                  <option value="blank">Blank</option>
+                </select>
+              </label>
+            </div>
+            <div class="row">
+              <label>Value Vertical Offset
+                <input id="oledValueYOffset" type="number" min="-12" max="12" step="1">
+              </label>
+            </div>
+            <p class="note">Choose what the OLED shows on the top and bottom rows, adjust the main value position, and switch the pressure unit between bar, PSI, and MPa.</p>
           </form>
         </div>
 
@@ -483,13 +622,16 @@
       "mqttHost", "mqttPort", "mqttUser", "mqttPassword", "mqttBaseTopic",
       "mqttDiscoveryPrefix", "sensorMinVoltage",
       "sensorMaxVoltage", "sensorMaxPressureKPa", "buzzerAlarmThresholdKPa",
-      "publishIntervalSeconds", "oledContrast"
+      "sensorFilterPreset",
+      "publishIntervalSeconds", "oledContrast", "oledPressureUnit",
+      "oledTopRowMode", "oledBottomRowMode", "oledValueYOffset"
     ];
 
     const checkboxes = ["mqttEnabled", "mqttDiscoveryEnabled", "buzzerEnabled", "oledFlip"];
     const tabButtons = Array.from(document.querySelectorAll(".tab-button"));
     const tabPanels = Array.from(document.querySelectorAll(".tab-panel"));
     const wifiNetworkList = document.getElementById("wifiNetworkList");
+    const passwordToggles = Array.from(document.querySelectorAll(".password-toggle"));
 
     function activateTab(tabName) {
       tabButtons.forEach((button) => {
@@ -572,7 +714,7 @@
       ["mqttPort", "publishIntervalSeconds"].forEach((id) => {
         payload[id] = Number(payload[id]);
       });
-      ["sensorMinVoltage", "sensorMaxVoltage", "sensorMaxPressureKPa", "buzzerAlarmThresholdKPa", "oledContrast"].forEach((id) => {
+      ["sensorMinVoltage", "sensorMaxVoltage", "sensorMaxPressureKPa", "buzzerAlarmThresholdKPa", "oledContrast", "oledValueYOffset"].forEach((id) => {
         payload[id] = Number(payload[id]);
       });
       checkboxes.forEach((id) => {
@@ -663,6 +805,14 @@
       }
     });
     tabButtons.forEach((button) => button.addEventListener("click", () => activateTab(button.dataset.tab)));
+    passwordToggles.forEach((button) => {
+      button.addEventListener("click", () => {
+        const input = document.getElementById(button.dataset.target);
+        const reveal = input.type === "password";
+        input.type = reveal ? "text" : "password";
+        button.classList.toggle("revealed", reveal);
+      });
+    });
 
     refreshConfig().catch((error) => setMessage(error.message, true));
     refreshStatus().catch((error) => setMessage(error.message, true));
