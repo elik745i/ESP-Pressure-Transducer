@@ -1,20 +1,21 @@
 #include <Arduino.h>
+#include <EEPROM.h>
 #include <LittleFS.h>
 #include <ArduinoJson.h>
 #include <DNSServer.h>
 #include <ESP8266HTTPClient.h>
 #include <ESP8266WebServer.h>
 #include <ESP8266WiFi.h>
-#include <ESP8266httpUpdate.h>
 #include <PubSubClient.h>
 #include <U8g2lib.h>
+#include <Updater.h>
 #include <WiFiClientSecureBearSSL.h>
 #include "web_ui.h"
 
 namespace {
 
 constexpr char CONFIG_PATH[] = "/config.json";
-constexpr char FIRMWARE_VERSION[] = "v1.1.1";
+constexpr char FIRMWARE_VERSION[] = "v1.1.2";
 constexpr char GITHUB_OWNER[] = "elik745i";
 constexpr char GITHUB_REPO[] = "ESP-Pressure-Transducer";
 constexpr char GITHUB_RELEASES_API_URL[] = "https://api.github.com/repos/elik745i/ESP-Pressure-Transducer/releases?per_page=10";
@@ -31,6 +32,26 @@ constexpr unsigned long DISPLAY_INTERVAL_MS = 500;
 constexpr unsigned long WIFI_RECONNECT_INTERVAL_MS = 15000;
 constexpr unsigned long MQTT_RECONNECT_INTERVAL_MS = 10000;
 constexpr unsigned long BOOT_INDICATION_MS = 4000;
+constexpr size_t EEPROM_SIZE_BYTES = 1024;
+constexpr uint32_t PERSISTENT_CONFIG_MAGIC = 0x50545231UL;
+constexpr uint16_t PERSISTENT_CONFIG_VERSION = 1;
+
+struct PersistentConfigData {
+  uint32_t magic;
+  uint16_t version;
+  char deviceName[64];
+  char wifiSsid[33];
+  char wifiPassword[65];
+  char mqttHost[64];
+  uint16_t mqttPort;
+  char mqttUser[65];
+  char mqttPassword[65];
+  char mqttBaseTopic[96];
+  char mqttDiscoveryPrefix[32];
+  uint8_t mqttEnabled;
+  uint8_t mqttDiscoveryEnabled;
+  uint32_t checksum;
+};
 
 struct AppConfig {
   String deviceName;
@@ -96,8 +117,9 @@ uint8_t otaProgressPercent = 0;
 String otaStatusMessage = "Idle";
 String otaUpdateVersion = "";
 String otaFirmwareUrl = "";
-String otaFilesystemUrl = "";
 String otaCurrentPhase = "";
+size_t otaProgressCurrentBytes = 0;
+size_t otaProgressTotalBytes = 0;
 
 enum class LedPattern {
   Booting,
@@ -116,6 +138,91 @@ String defaultDeviceName() {
 
 String defaultApSsid() {
   return String("PressureConfig-") + String(ESP.getChipId(), HEX);
+}
+
+uint32_t persistentConfigChecksum(const PersistentConfigData &data) {
+  const uint8_t *bytes = reinterpret_cast<const uint8_t *>(&data);
+  const size_t checksumOffset = offsetof(PersistentConfigData, checksum);
+  uint32_t hash = 2166136261UL;
+  for (size_t index = 0; index < checksumOffset; ++index) {
+    hash ^= bytes[index];
+    hash *= 16777619UL;
+  }
+  return hash;
+}
+
+void writeFixedString(char *target, size_t size, const String &value) {
+  if (size == 0) {
+    return;
+  }
+  memset(target, 0, size);
+  value.substring(0, size - 1).toCharArray(target, size);
+}
+
+String readFixedString(const char *value, size_t size) {
+  size_t length = 0;
+  while (length < size && value[length] != '\0') {
+    ++length;
+  }
+  return String(value).substring(0, length);
+}
+
+bool loadPersistentConfig() {
+  PersistentConfigData stored{};
+  EEPROM.get(0, stored);
+
+  if (stored.magic != PERSISTENT_CONFIG_MAGIC ||
+      stored.version != PERSISTENT_CONFIG_VERSION ||
+      stored.checksum != persistentConfigChecksum(stored)) {
+    return false;
+  }
+
+  config.deviceName = readFixedString(stored.deviceName, sizeof(stored.deviceName));
+  config.wifiSsid = readFixedString(stored.wifiSsid, sizeof(stored.wifiSsid));
+  config.wifiPassword = readFixedString(stored.wifiPassword, sizeof(stored.wifiPassword));
+  config.mqttHost = readFixedString(stored.mqttHost, sizeof(stored.mqttHost));
+  config.mqttPort = stored.mqttPort;
+  config.mqttUser = readFixedString(stored.mqttUser, sizeof(stored.mqttUser));
+  config.mqttPassword = readFixedString(stored.mqttPassword, sizeof(stored.mqttPassword));
+  config.mqttBaseTopic = readFixedString(stored.mqttBaseTopic, sizeof(stored.mqttBaseTopic));
+  config.mqttDiscoveryPrefix = readFixedString(stored.mqttDiscoveryPrefix, sizeof(stored.mqttDiscoveryPrefix));
+  config.mqttEnabled = stored.mqttEnabled != 0;
+  config.mqttDiscoveryEnabled = stored.mqttDiscoveryEnabled != 0;
+
+  if (config.deviceName.isEmpty()) {
+    config.deviceName = defaultDeviceName();
+  }
+  if (config.mqttPort == 0) {
+    config.mqttPort = 1883;
+  }
+  if (config.mqttBaseTopic.isEmpty()) {
+    config.mqttBaseTopic = String("home/") + config.deviceName;
+  }
+  if (config.mqttDiscoveryPrefix.isEmpty()) {
+    config.mqttDiscoveryPrefix = "homeassistant";
+  }
+  return true;
+}
+
+bool savePersistentConfig() {
+  PersistentConfigData stored{};
+  stored.magic = PERSISTENT_CONFIG_MAGIC;
+  stored.version = PERSISTENT_CONFIG_VERSION;
+  writeFixedString(stored.deviceName, sizeof(stored.deviceName), config.deviceName);
+  writeFixedString(stored.wifiSsid, sizeof(stored.wifiSsid), config.wifiSsid);
+  writeFixedString(stored.wifiPassword, sizeof(stored.wifiPassword), config.wifiPassword);
+  writeFixedString(stored.mqttHost, sizeof(stored.mqttHost), config.mqttHost);
+  stored.mqttPort = config.mqttPort;
+  writeFixedString(stored.mqttUser, sizeof(stored.mqttUser), config.mqttUser);
+  writeFixedString(stored.mqttPassword, sizeof(stored.mqttPassword), config.mqttPassword);
+  writeFixedString(stored.mqttBaseTopic, sizeof(stored.mqttBaseTopic), config.mqttBaseTopic);
+  writeFixedString(stored.mqttDiscoveryPrefix, sizeof(stored.mqttDiscoveryPrefix), config.mqttDiscoveryPrefix);
+  stored.mqttEnabled = config.mqttEnabled ? 1 : 0;
+  stored.mqttDiscoveryEnabled = config.mqttDiscoveryEnabled ? 1 : 0;
+  stored.checksum = persistentConfigChecksum(stored);
+
+  EEPROM.put(0, stored);
+  return EEPROM.commit();
 }
 
 void setDefaults() {
@@ -149,19 +256,8 @@ void setDefaults() {
 
 bool saveConfig() {
   JsonDocument doc;
-  doc["deviceName"] = config.deviceName;
   doc["apSsid"] = config.apSsid;
   doc["apPassword"] = config.apPassword;
-  doc["wifiSsid"] = config.wifiSsid;
-  doc["wifiPassword"] = config.wifiPassword;
-  doc["mqttHost"] = config.mqttHost;
-  doc["mqttPort"] = config.mqttPort;
-  doc["mqttUser"] = config.mqttUser;
-  doc["mqttPassword"] = config.mqttPassword;
-  doc["mqttBaseTopic"] = config.mqttBaseTopic;
-  doc["mqttDiscoveryPrefix"] = config.mqttDiscoveryPrefix;
-  doc["mqttEnabled"] = config.mqttEnabled;
-  doc["mqttDiscoveryEnabled"] = config.mqttDiscoveryEnabled;
   doc["sensorMinVoltage"] = config.sensorMinVoltage;
   doc["sensorMaxVoltage"] = config.sensorMaxVoltage;
   doc["sensorMaxPressureKPa"] = config.sensorMaxPressureKPa;
@@ -188,36 +284,29 @@ bool saveConfig() {
 
 bool loadConfig() {
   setDefaults();
+  const bool hasPersistentConfig = loadPersistentConfig();
 
   if (!LittleFS.exists(CONFIG_PATH)) {
+    if (!hasPersistentConfig) {
+      savePersistentConfig();
+    }
     return saveConfig();
   }
 
   File file = LittleFS.open(CONFIG_PATH, "r");
   if (!file) {
-    return false;
+    return hasPersistentConfig ? saveConfig() : false;
   }
 
   JsonDocument doc;
   DeserializationError error = deserializeJson(doc, file);
   file.close();
   if (error) {
-    return false;
+    return hasPersistentConfig ? saveConfig() : false;
   }
 
-  config.deviceName = doc["deviceName"] | config.deviceName;
   config.apSsid = doc["apSsid"] | config.apSsid;
   config.apPassword = doc["apPassword"] | config.apPassword;
-  config.wifiSsid = doc["wifiSsid"] | config.wifiSsid;
-  config.wifiPassword = doc["wifiPassword"] | config.wifiPassword;
-  config.mqttHost = doc["mqttHost"] | config.mqttHost;
-  config.mqttPort = doc["mqttPort"] | config.mqttPort;
-  config.mqttUser = doc["mqttUser"] | config.mqttUser;
-  config.mqttPassword = doc["mqttPassword"] | config.mqttPassword;
-  config.mqttBaseTopic = doc["mqttBaseTopic"] | config.mqttBaseTopic;
-  config.mqttDiscoveryPrefix = doc["mqttDiscoveryPrefix"] | config.mqttDiscoveryPrefix;
-  config.mqttEnabled = doc["mqttEnabled"] | config.mqttEnabled;
-  config.mqttDiscoveryEnabled = doc["mqttDiscoveryEnabled"] | config.mqttDiscoveryEnabled;
   config.sensorMinVoltage = doc["sensorMinVoltage"] | config.sensorMinVoltage;
   config.sensorMaxVoltage = doc["sensorMaxVoltage"] | config.sensorMaxVoltage;
   config.sensorMaxPressureKPa = doc["sensorMaxPressureKPa"] | config.sensorMaxPressureKPa;
@@ -231,6 +320,22 @@ bool loadConfig() {
   config.oledTopRowMode = doc["oledTopRowMode"] | config.oledTopRowMode;
   config.oledBottomRowMode = doc["oledBottomRowMode"] | config.oledBottomRowMode;
   config.oledValueYOffset = doc["oledValueYOffset"] | config.oledValueYOffset;
+
+  if (!hasPersistentConfig) {
+    config.deviceName = doc["deviceName"] | config.deviceName;
+    config.wifiSsid = doc["wifiSsid"] | config.wifiSsid;
+    config.wifiPassword = doc["wifiPassword"] | config.wifiPassword;
+    config.mqttHost = doc["mqttHost"] | config.mqttHost;
+    config.mqttPort = doc["mqttPort"] | config.mqttPort;
+    config.mqttUser = doc["mqttUser"] | config.mqttUser;
+    config.mqttPassword = doc["mqttPassword"] | config.mqttPassword;
+    config.mqttBaseTopic = doc["mqttBaseTopic"] | config.mqttBaseTopic;
+    config.mqttDiscoveryPrefix = doc["mqttDiscoveryPrefix"] | config.mqttDiscoveryPrefix;
+    config.mqttEnabled = doc["mqttEnabled"] | config.mqttEnabled;
+    config.mqttDiscoveryEnabled = doc["mqttDiscoveryEnabled"] | config.mqttDiscoveryEnabled;
+    savePersistentConfig();
+    saveConfig();
+  }
   return true;
 }
 
@@ -530,44 +635,114 @@ void playMqttConnectedMelody() {
   playMelody(frequencies, durations, 4, true);
 }
 
-void configureOtaCallbacks() {
-  ESPhttpUpdate.rebootOnUpdate(false);
-  ESPhttpUpdate.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
-  ESPhttpUpdate.setLedPin(STATUS_LED_PIN, LOW);
-  ESPhttpUpdate.onStart([]() {
-    otaUpdateRunning = true;
-    otaProgressPercent = 0;
-    otaStatusMessage = otaCurrentPhase + " update started...";
-  });
-  ESPhttpUpdate.onProgress([](int current, int total) {
-    otaProgressPercent = total > 0 ? static_cast<uint8_t>((current * 100) / total) : 0;
-    otaStatusMessage = otaCurrentPhase + " update " + String(otaProgressPercent) + "%";
-    yield();
-  });
-  ESPhttpUpdate.onEnd([]() {
-    otaProgressPercent = 100;
-    otaStatusMessage = otaCurrentPhase + " update completed.";
-  });
-  ESPhttpUpdate.onError([](int) {
-    otaUpdateRunning = false;
-    otaUpdateRequested = false;
-    otaProgressPercent = 0;
-    otaStatusMessage = String("Update failed: ") + ESPhttpUpdate.getLastErrorString();
-  });
+void serviceBackgroundTasksDuringOta() {
+  if (accessPointEnabled) {
+    dnsServer.processNextRequest();
+  }
+  server.handleClient();
+  yield();
 }
 
-t_httpUpdate_return runHttpUpdate(const String &url, bool updateFilesystem) {
+bool runHttpUpdate(const String &url, int updateCommand, const String &phaseLabel) {
   BearSSL::WiFiClientSecure client;
   client.setInsecure();
   client.setTimeout(30000);
+  client.setBufferSizes(512, 512);
 
-  if (updateFilesystem) {
-    otaCurrentPhase = "Filesystem";
-    return ESPhttpUpdate.updateFS(client, url);
+  HTTPClient https;
+  https.setReuse(false);
+  https.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
+  https.setTimeout(30000);
+  https.setUserAgent(githubUserAgent());
+
+  otaCurrentPhase = phaseLabel;
+  otaProgressCurrentBytes = 0;
+  otaProgressTotalBytes = 0;
+  otaProgressPercent = 0;
+  otaStatusMessage = phaseLabel + " update started...";
+
+  if (!https.begin(client, url)) {
+    otaStatusMessage = phaseLabel + " update failed: could not open URL.";
+    return false;
   }
 
-  otaCurrentPhase = "Firmware";
-  return ESPhttpUpdate.update(client, url, FIRMWARE_VERSION);
+  const int statusCode = https.GET();
+  if (statusCode != HTTP_CODE_OK) {
+    otaStatusMessage = phaseLabel + " update failed: HTTP " + String(statusCode);
+    https.end();
+    return false;
+  }
+
+  const int totalBytes = https.getSize();
+  if (totalBytes <= 0) {
+    otaStatusMessage = phaseLabel + " update failed: unknown content length.";
+    https.end();
+    return false;
+  }
+
+  otaProgressTotalBytes = static_cast<size_t>(totalBytes);
+  WiFiClient *stream = https.getStreamPtr();
+  if (stream == nullptr) {
+    otaStatusMessage = phaseLabel + " update failed: no download stream.";
+    https.end();
+    return false;
+  }
+
+  if (!Update.begin(static_cast<size_t>(totalBytes), updateCommand)) {
+    otaStatusMessage = phaseLabel + " update failed: " + Update.getErrorString();
+    https.end();
+    return false;
+  }
+
+  uint8_t buffer[1024];
+  while (https.connected() && (otaProgressCurrentBytes < otaProgressTotalBytes)) {
+    const size_t available = stream->available();
+    if (available == 0) {
+      serviceBackgroundTasksDuringOta();
+      delay(1);
+      continue;
+    }
+
+    const size_t toRead = available > sizeof(buffer) ? sizeof(buffer) : available;
+    const size_t bytesRead = stream->readBytes(buffer, toRead);
+    if (bytesRead == 0) {
+      serviceBackgroundTasksDuringOta();
+      continue;
+    }
+
+    const size_t written = Update.write(buffer, bytesRead);
+    if (written != bytesRead) {
+      Update.end();
+      otaStatusMessage = phaseLabel + " update failed: " + Update.getErrorString();
+      https.end();
+      return false;
+    }
+
+    otaProgressCurrentBytes += written;
+    otaProgressPercent = otaProgressTotalBytes > 0
+                             ? static_cast<uint8_t>((otaProgressCurrentBytes * 100U) / otaProgressTotalBytes)
+                             : 0;
+    otaStatusMessage = phaseLabel + " update " + String(otaProgressPercent) + "%";
+    serviceBackgroundTasksDuringOta();
+  }
+
+  if (!Update.end()) {
+    otaStatusMessage = phaseLabel + " update failed: " + Update.getErrorString();
+    https.end();
+    return false;
+  }
+
+  if (!Update.isFinished()) {
+    otaStatusMessage = phaseLabel + " update failed: incomplete write.";
+    https.end();
+    return false;
+  }
+
+  otaProgressCurrentBytes = otaProgressTotalBytes;
+  otaProgressPercent = 100;
+  otaStatusMessage = phaseLabel + " update completed.";
+  https.end();
+  return true;
 }
 
 void performQueuedOtaUpdate() {
@@ -585,32 +760,18 @@ void performQueuedOtaUpdate() {
   otaUpdateRunning = true;
   otaStatusMessage = "Preparing update " + otaUpdateVersion + "...";
   otaProgressPercent = 0;
+  otaProgressCurrentBytes = 0;
+  otaProgressTotalBytes = 0;
 
-  if (!otaFilesystemUrl.isEmpty()) {
-    const t_httpUpdate_return fsResult = runHttpUpdate(otaFilesystemUrl, true);
-    if (fsResult != HTTP_UPDATE_OK) {
-      otaUpdateRunning = false;
-      otaProgressPercent = 0;
-      if (!otaStatusMessage.startsWith("Update failed:")) {
-        otaStatusMessage = String("Filesystem update failed: ") + ESPhttpUpdate.getLastErrorString();
-      }
-      return;
-    }
-  }
-
-  const t_httpUpdate_return firmwareResult = runHttpUpdate(otaFirmwareUrl, false);
-  if (firmwareResult != HTTP_UPDATE_OK) {
+  if (!runHttpUpdate(otaFirmwareUrl, U_FLASH, "Firmware")) {
     otaUpdateRunning = false;
-    otaProgressPercent = 0;
-    if (!otaStatusMessage.startsWith("Update failed:")) {
-      otaStatusMessage = String("Firmware update failed: ") + ESPhttpUpdate.getLastErrorString();
-    }
     return;
   }
 
   otaUpdateRunning = false;
   otaProgressPercent = 100;
   otaCurrentPhase = "";
+  otaProgressCurrentBytes = otaProgressTotalBytes;
   otaStatusMessage = "Firmware " + otaUpdateVersion + " installed. Restarting...";
   scheduleRestart(1500);
 }
@@ -719,7 +880,6 @@ void sendConfigPage() {
 
   File file = LittleFS.open("/index.html.gz", "r");
   if (file) {
-    server.sendHeader("Content-Encoding", "gzip");
     server.streamFile(file, "text/html");
     file.close();
     return;
@@ -969,14 +1129,25 @@ void sendWifiScanResults() {
 }
 
 void sendFirmwareInfo() {
+  const bool includeReleases = server.hasArg("refresh") && server.arg("refresh") == "1";
   JsonDocument response;
   response["currentVersion"] = FIRMWARE_VERSION;
   response["updateStatus"] = otaStatusMessage;
   response["updateBusy"] = otaUpdateRunning || otaUpdateRequested;
   response["updateProgress"] = otaProgressPercent;
+  response["updatePhase"] = otaCurrentPhase;
+  response["updateBytes"] = otaProgressCurrentBytes;
+  response["updateTotalBytes"] = otaProgressTotalBytes;
   response["selectedVersion"] = otaUpdateVersion;
 
   JsonArray releasesOut = response["releases"].to<JsonArray>();
+  if (!includeReleases) {
+    String payload;
+    serializeJson(response, payload);
+    server.send(200, "application/json", payload);
+    return;
+  }
+
   JsonDocument releases;
   String errorMessage;
   if (!fetchGithubReleases(releases, errorMessage)) {
@@ -1073,12 +1244,13 @@ void handleFirmwareUpdatePost() {
 
   otaUpdateVersion = requestedVersion;
   otaFirmwareUrl = firmwareUrl;
-  otaFilesystemUrl = filesystemUrl;
   otaUpdateRequested = true;
   otaUpdateRunning = false;
   otaProgressPercent = 0;
   otaCurrentPhase = "";
-  otaStatusMessage = "Update queued for " + requestedVersion + ".";
+  otaStatusMessage = filesystemUrl.isEmpty()
+                         ? "Update queued for " + requestedVersion + "."
+                         : "Update queued for " + requestedVersion + " (firmware only, settings preserved).";
 
   JsonDocument response;
   response["ok"] = true;
@@ -1172,6 +1344,11 @@ bool updateConfigFromRequest() {
     config.sensorFilterPreset = "none";
   }
 
+  if (!savePersistentConfig()) {
+    server.send(500, "application/json", "{\"error\":\"Failed to save persistent configuration\"}");
+    return false;
+  }
+
   if (!saveConfig()) {
     server.send(500, "application/json", "{\"error\":\"Failed to save configuration\"}");
     return false;
@@ -1244,9 +1421,12 @@ void setupApp() {
     Serial.println("LittleFS mount failed");
   }
 
+  EEPROM.begin(EEPROM_SIZE_BYTES);
+
   if (!loadConfig()) {
     Serial.println("Using default config");
     setDefaults();
+    savePersistentConfig();
     saveConfig();
   }
 
@@ -1260,7 +1440,6 @@ void setupApp() {
 
   connectWifi();
   mqttClient.setBufferSize(768);
-  configureOtaCallbacks();
   configureWebServer();
 }
 
