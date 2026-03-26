@@ -172,6 +172,10 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
       transform: translateY(-50%) scale(1.05);
     }
 
+    .password-toggle:active {
+      transform: translateY(calc(-50% + 2px)) scale(0.96);
+    }
+
     .eye-icon {
       position: relative;
       display: block;
@@ -253,12 +257,18 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
       color: white;
       background: linear-gradient(180deg, var(--accent), var(--accent-strong));
       cursor: pointer;
-      transition: filter 120ms ease, transform 120ms ease;
+      transition: filter 120ms ease, transform 120ms ease, box-shadow 120ms ease;
       box-shadow: none;
     }
 
     button:hover {
       filter: brightness(1.02);
+    }
+
+    button:active {
+      transform: translateY(2px) scale(0.98);
+      filter: brightness(0.98);
+      box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.18);
     }
 
     button.secondary {
@@ -454,6 +464,10 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
       color: white;
       background: linear-gradient(180deg, var(--accent), var(--accent-strong));
       border-color: #cf8400;
+    }
+
+    .tab-button:active {
+      transform: translateY(2px) scale(0.98);
     }
 
     .tab-button:focus-visible,

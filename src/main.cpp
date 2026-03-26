@@ -15,10 +15,10 @@
 namespace {
 
 constexpr char CONFIG_PATH[] = "/config.json";
-constexpr char FIRMWARE_VERSION[] = "v1.1.2";
+constexpr char FIRMWARE_VERSION[] = "v1.1.3";
 constexpr char GITHUB_OWNER[] = "elik745i";
 constexpr char GITHUB_REPO[] = "ESP-Pressure-Transducer";
-constexpr char GITHUB_RELEASES_API_URL[] = "https://api.github.com/repos/elik745i/ESP-Pressure-Transducer/releases?per_page=10";
+constexpr char GITHUB_TAGS_API_URL[] = "https://api.github.com/repos/elik745i/ESP-Pressure-Transducer/tags?per_page=10";
 constexpr char GITHUB_FIRMWARE_ASSET_NAME[] = "firmware.bin";
 constexpr char GITHUB_FILESYSTEM_ASSET_NAME[] = "littlefs.bin";
 constexpr uint8_t BUZZER_PIN = D5;
@@ -459,11 +459,12 @@ String githubUserAgent() {
   return String("ESP-Pressure-Transducer/") + FIRMWARE_VERSION;
 }
 
-String normalizedReleaseDate(const String &publishedAt) {
-  return publishedAt.length() >= 10 ? publishedAt.substring(0, 10) : publishedAt;
+String githubReleaseAssetUrl(const String &tagName, const char *assetName) {
+  return String("https://github.com/") + GITHUB_OWNER + "/" + GITHUB_REPO +
+         "/releases/download/" + tagName + "/" + assetName;
 }
 
-bool fetchGithubReleases(JsonDocument &doc, String &errorMessage) {
+bool fetchGithubTags(JsonDocument &doc, String &errorMessage) {
   if (!WiFi.isConnected()) {
     errorMessage = "Connect to Wi-Fi to check GitHub releases.";
     return false;
@@ -478,8 +479,8 @@ bool fetchGithubReleases(JsonDocument &doc, String &errorMessage) {
   https.setTimeout(15000);
   https.setUserAgent(githubUserAgent());
 
-  if (!https.begin(client, GITHUB_RELEASES_API_URL)) {
-    errorMessage = "Failed to open GitHub releases API.";
+  if (!https.begin(client, GITHUB_TAGS_API_URL)) {
+    errorMessage = "Failed to open GitHub tags API.";
     return false;
   }
 
@@ -494,23 +495,15 @@ bool fetchGithubReleases(JsonDocument &doc, String &errorMessage) {
   }
 
   JsonDocument filter;
-  JsonObject releaseFilter = filter.add<JsonObject>();
-  releaseFilter["tag_name"] = true;
-  releaseFilter["name"] = true;
-  releaseFilter["draft"] = true;
-  releaseFilter["prerelease"] = true;
-  releaseFilter["published_at"] = true;
-  JsonArray assetsFilter = releaseFilter["assets"].to<JsonArray>();
-  JsonObject assetFilter = assetsFilter.add<JsonObject>();
-  assetFilter["name"] = true;
-  assetFilter["browser_download_url"] = true;
+  JsonObject tagFilter = filter.add<JsonObject>();
+  tagFilter["name"] = true;
 
   doc.clear();
   DeserializationError error = deserializeJson(doc, https.getStream(), DeserializationOption::Filter(filter));
   https.end();
 
   if (error) {
-    errorMessage = String("GitHub response parse failed: ") + error.c_str();
+    errorMessage = String("GitHub tags parse failed: ") + error.c_str();
     return false;
   }
 
@@ -518,39 +511,23 @@ bool fetchGithubReleases(JsonDocument &doc, String &errorMessage) {
 }
 
 bool resolveReleaseAssets(const String &tagName, String &firmwareUrl, String &filesystemUrl, String &errorMessage) {
-  JsonDocument releases;
-  if (!fetchGithubReleases(releases, errorMessage)) {
+  JsonDocument tags;
+  if (!fetchGithubTags(tags, errorMessage)) {
     return false;
   }
 
-  for (JsonObject release : releases.as<JsonArray>()) {
-    const String releaseTag = String(static_cast<const char *>(release["tag_name"] | ""));
-    if (releaseTag != tagName || (release["draft"] | false)) {
+  for (JsonObject tag : tags.as<JsonArray>()) {
+    const String releaseTag = String(static_cast<const char *>(tag["name"] | ""));
+    if (releaseTag != tagName) {
       continue;
     }
 
-    firmwareUrl = "";
-    filesystemUrl = "";
-
-    for (JsonObject asset : release["assets"].as<JsonArray>()) {
-      const String assetName = String(static_cast<const char *>(asset["name"] | ""));
-      const String assetUrl = String(static_cast<const char *>(asset["browser_download_url"] | ""));
-      if (assetName == GITHUB_FIRMWARE_ASSET_NAME) {
-        firmwareUrl = assetUrl;
-      } else if (assetName == GITHUB_FILESYSTEM_ASSET_NAME) {
-        filesystemUrl = assetUrl;
-      }
-    }
-
-    if (firmwareUrl.isEmpty()) {
-      errorMessage = "Selected release has no firmware.bin asset.";
-      return false;
-    }
-
+    firmwareUrl = githubReleaseAssetUrl(releaseTag, GITHUB_FIRMWARE_ASSET_NAME);
+    filesystemUrl = githubReleaseAssetUrl(releaseTag, GITHUB_FILESYSTEM_ASSET_NAME);
     return true;
   }
 
-  errorMessage = "Selected firmware release was not found on GitHub.";
+  errorMessage = "Selected firmware tag was not found on GitHub.";
   return false;
 }
 
@@ -862,6 +839,12 @@ bool isIpAddress(const String &value) {
   return true;
 }
 
+void addNoCacheHeaders() {
+  server.sendHeader("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
+  server.sendHeader("Pragma", "no-cache");
+  server.sendHeader("Expires", "0");
+}
+
 bool captivePortalRedirect() {
   const String host = server.hostHeader();
   if (host.isEmpty() || isIpAddress(host) || host == WiFi.softAPIP().toString()) {
@@ -878,19 +861,7 @@ void sendConfigPage() {
     return;
   }
 
-  File file = LittleFS.open("/index.html.gz", "r");
-  if (file) {
-    server.streamFile(file, "text/html");
-    file.close();
-    return;
-  }
-
-  file = LittleFS.open("/index.html", "r");
-  if (file) {
-    server.streamFile(file, "text/html");
-    file.close();
-    return;
-  }
+  addNoCacheHeaders();
 
   server.send_P(200, "text/html", INDEX_HTML);
 }
@@ -1051,6 +1022,7 @@ void drawDisplay() {
 }
 
 void sendJsonConfig() {
+  addNoCacheHeaders();
   JsonDocument doc;
   doc["deviceName"] = config.deviceName;
   doc["apSsid"] = config.apSsid;
@@ -1085,6 +1057,7 @@ void sendJsonConfig() {
 }
 
 void sendStatus() {
+  addNoCacheHeaders();
   JsonDocument doc;
   doc["deviceName"] = config.deviceName;
   doc["firmwareVersion"] = FIRMWARE_VERSION;
@@ -1109,6 +1082,7 @@ void sendStatus() {
 }
 
 void sendWifiScanResults() {
+  addNoCacheHeaders();
   JsonDocument doc;
   JsonArray networks = doc["networks"].to<JsonArray>();
 
@@ -1129,6 +1103,7 @@ void sendWifiScanResults() {
 }
 
 void sendFirmwareInfo() {
+  addNoCacheHeaders();
   const bool includeReleases = server.hasArg("refresh") && server.arg("refresh") == "1";
   JsonDocument response;
   response["currentVersion"] = FIRMWARE_VERSION;
@@ -1148,9 +1123,9 @@ void sendFirmwareInfo() {
     return;
   }
 
-  JsonDocument releases;
+  JsonDocument tags;
   String errorMessage;
-  if (!fetchGithubReleases(releases, errorMessage)) {
+  if (!fetchGithubTags(tags, errorMessage)) {
     response["error"] = errorMessage;
     String payload;
     serializeJson(response, payload);
@@ -1159,38 +1134,22 @@ void sendFirmwareInfo() {
   }
 
   String latestVersion;
-  for (JsonObject release : releases.as<JsonArray>()) {
-    if (release["draft"] | false) {
+  for (JsonObject tag : tags.as<JsonArray>()) {
+    const String tagName = String(static_cast<const char *>(tag["name"] | ""));
+    if (tagName.isEmpty()) {
       continue;
     }
 
-    String firmwareUrl;
-    String filesystemUrl;
-    for (JsonObject asset : release["assets"].as<JsonArray>()) {
-      const String assetName = String(static_cast<const char *>(asset["name"] | ""));
-      const String assetUrl = String(static_cast<const char *>(asset["browser_download_url"] | ""));
-      if (assetName == GITHUB_FIRMWARE_ASSET_NAME) {
-        firmwareUrl = assetUrl;
-      } else if (assetName == GITHUB_FILESYSTEM_ASSET_NAME) {
-        filesystemUrl = assetUrl;
-      }
-    }
-
-    if (firmwareUrl.isEmpty()) {
-      continue;
-    }
-
-    const String tagName = String(static_cast<const char *>(release["tag_name"] | ""));
     if (latestVersion.isEmpty()) {
       latestVersion = tagName;
     }
 
     JsonObject item = releasesOut.add<JsonObject>();
     item["tag"] = tagName;
-    item["name"] = String(static_cast<const char *>(release["name"] | tagName.c_str()));
-    item["publishedAt"] = normalizedReleaseDate(String(static_cast<const char *>(release["published_at"] | "")));
-    item["prerelease"] = release["prerelease"] | false;
-    item["hasFilesystem"] = !filesystemUrl.isEmpty();
+    item["name"] = tagName;
+    item["publishedAt"] = "";
+    item["prerelease"] = false;
+    item["hasFilesystem"] = true;
     item["isCurrent"] = tagName == FIRMWARE_VERSION;
     item["isLatest"] = false;
     item["isNew"] = false;
