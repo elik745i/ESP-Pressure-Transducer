@@ -1,0 +1,623 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ESP Pressure Transducer</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f2f2f2;
+      --panel: #ffffff;
+      --panel-soft: #f8f8f8;
+      --ink: #333333;
+      --muted: #6a6a6a;
+      --accent: #f39c12;
+      --accent-strong: #d98200;
+      --accent-soft: #fff4df;
+      --line: #d8d8d8;
+      --warn: #b45309;
+      --shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+      --radius: 12px;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: Verdana, Arial, sans-serif;
+      color: var(--ink);
+      background: var(--bg);
+    }
+
+    .wrap {
+      width: min(980px, calc(100% - 20px));
+      margin: 12px auto 24px;
+    }
+
+    .hero,
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+    }
+
+    .hero {
+      padding: 16px;
+      display: grid;
+      gap: 14px;
+    }
+
+    .hero-top {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 16px;
+    }
+
+    h1,
+    h2 {
+      margin: 0;
+      font-weight: 700;
+    }
+
+    h1 {
+      font-size: clamp(1.4rem, 2.3vw, 2rem);
+    }
+
+    h2 {
+      font-size: 1rem;
+      margin-bottom: 12px;
+      color: #444444;
+    }
+
+    .muted {
+      color: var(--muted);
+      font-size: 0.92rem;
+    }
+
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 10px;
+    }
+
+    .stat {
+      padding: 12px;
+      border-radius: 10px;
+      background: var(--panel-soft);
+      border: 1px solid var(--line);
+      text-align: center;
+    }
+
+    .stat-label {
+      font-size: 0.76rem;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--muted);
+    }
+
+    .stat-value {
+      margin-top: 6px;
+      font-size: clamp(1.1rem, 3vw, 1.8rem);
+      font-weight: 700;
+      color: #2d2d2d;
+    }
+
+    .grid {
+      margin-top: 12px;
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 12px;
+    }
+
+    .panel {
+      padding: 16px;
+    }
+
+    .panel-wide {
+      grid-column: 1 / -1;
+    }
+
+    form {
+      display: grid;
+      gap: 10px;
+    }
+
+    label {
+      display: grid;
+      gap: 4px;
+      font-size: 0.88rem;
+      font-weight: 600;
+    }
+
+    input,
+    select {
+      width: 100%;
+      border: 1px solid #cfcfcf;
+      border-radius: 8px;
+      padding: 10px 12px;
+      background: #ffffff;
+      color: var(--ink);
+      font: inherit;
+      min-height: 42px;
+    }
+
+    input[type="checkbox"] {
+      width: 18px;
+      height: 18px;
+    }
+
+    .check {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      font-weight: 600;
+      padding: 6px 0;
+    }
+
+    .row {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }
+
+    button {
+      border: 0;
+      border-radius: 8px;
+      padding: 10px 16px;
+      font: inherit;
+      font-weight: 700;
+      color: white;
+      background: linear-gradient(180deg, var(--accent), var(--accent-strong));
+      cursor: pointer;
+      transition: filter 120ms ease, transform 120ms ease;
+      box-shadow: none;
+    }
+
+    button:hover {
+      filter: brightness(1.02);
+    }
+
+    button.secondary {
+      color: var(--ink);
+      background: #e9e9e9;
+      box-shadow: none;
+      border: 1px solid #cfcfcf;
+    }
+
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 8px;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      border-radius: 999px;
+      padding: 6px 10px;
+      background: var(--accent-soft);
+      color: var(--accent-strong);
+      font-size: 0.8rem;
+      font-weight: 700;
+    }
+
+    .status-list {
+      display: grid;
+      gap: 6px;
+      margin-top: 8px;
+    }
+
+    .status-item {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      border-bottom: 1px solid #efefef;
+      padding: 4px 0 8px;
+      font-size: 0.92rem;
+    }
+
+    .note {
+      margin-top: 10px;
+      font-size: 0.84rem;
+      color: var(--warn);
+      line-height: 1.4;
+    }
+
+    #message {
+      min-height: 1.4em;
+      font-weight: 700;
+    }
+
+    .tabs {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 16px;
+      padding-bottom: 10px;
+      border-bottom: 1px solid #ececec;
+    }
+
+    .tab-button {
+      color: #505050;
+      background: #eeeeee;
+      box-shadow: none;
+      border: 1px solid #d5d5d5;
+      min-width: 110px;
+    }
+
+    .tab-button[aria-selected="true"] {
+      color: white;
+      background: linear-gradient(180deg, var(--accent), var(--accent-strong));
+      border-color: #cf8400;
+    }
+
+    .tab-button:focus-visible,
+    input:focus-visible,
+    button:focus-visible {
+      outline: 2px solid #4d90fe;
+      outline-offset: 1px;
+    }
+
+    .tab-panel {
+      display: none;
+    }
+
+    .tab-panel.active {
+      display: block;
+      animation: fadeIn 140ms ease;
+    }
+
+    @keyframes fadeIn {
+      from {
+        opacity: 0;
+      }
+      to {
+        opacity: 1;
+      }
+    }
+
+    @media (max-width: 640px) {
+      .wrap {
+        width: min(100% - 12px, 980px);
+        margin-top: 6px;
+      }
+
+      .row {
+        grid-template-columns: 1fr;
+      }
+
+      .hero,
+      .panel {
+        padding: 12px;
+      }
+
+      .tabs {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .tab-button {
+        width: 100%;
+        min-width: 0;
+      }
+
+      .stat-value {
+        font-size: 1.25rem;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <section class="hero">
+      <div class="hero-top">
+        <div>
+          <div class="badge">ESP8266 Pressure Monitor</div>
+          <h1 id="deviceTitle">Loading...</h1>
+          <p class="muted">Tasmota-style configuration page for Wi-Fi, MQTT, device tuning, and OLED settings.</p>
+        </div>
+        <div>
+          <div class="muted">Open this page on the device IP or on the fallback AP at <strong>192.168.4.1</strong>.</div>
+        </div>
+      </div>
+
+      <div class="stats">
+        <div class="stat">
+          <div class="stat-label">Pressure</div>
+          <div class="stat-value" id="pressureValue">--.- kPa</div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">Pressure</div>
+          <div class="stat-value" id="barValue">--.-- bar</div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">Sensor Voltage</div>
+          <div class="stat-value" id="sensorVoltage">-.---</div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">Connection</div>
+          <div class="stat-value" id="connectionState">Checking...</div>
+        </div>
+      </div>
+    </section>
+
+    <div class="grid">
+      <section class="panel">
+        <h2>Live Status</h2>
+        <div class="status-list">
+          <div class="status-item"><span>Wi-Fi</span><strong id="wifiStatus">-</strong></div>
+          <div class="status-item"><span>IP Address</span><strong id="ipAddress">-</strong></div>
+          <div class="status-item"><span>Access Point</span><strong id="apInfo">-</strong></div>
+          <div class="status-item"><span>MQTT</span><strong id="mqttStatus">-</strong></div>
+          <div class="status-item"><span>ADC Raw</span><strong id="rawAdc">-</strong></div>
+          <div class="status-item"><span>Alarm</span><strong id="alarmStatus">-</strong></div>
+          <div class="status-item"><span>Uptime</span><strong id="uptime">-</strong></div>
+        </div>
+        <p class="note">If pressure reads wrong, adjust the sensor voltage range and max pressure in Calibration.</p>
+      </section>
+
+      <section class="panel panel-wide">
+        <div class="tabs" role="tablist" aria-label="Configuration tabs">
+          <button class="tab-button" type="button" role="tab" aria-selected="true" aria-controls="tab-wifi" data-tab="wifi">Wi-Fi</button>
+          <button class="tab-button" type="button" role="tab" aria-selected="false" aria-controls="tab-mqtt" data-tab="mqtt">MQTT</button>
+          <button class="tab-button" type="button" role="tab" aria-selected="false" aria-controls="tab-device" data-tab="device">Device</button>
+          <button class="tab-button" type="button" role="tab" aria-selected="false" aria-controls="tab-oled" data-tab="oled">OLED</button>
+        </div>
+
+        <div id="tab-wifi" class="tab-panel active" role="tabpanel">
+          <h2>Wi-Fi</h2>
+          <form id="networkForm">
+            <div class="row">
+              <label>Wi-Fi SSID
+                <input id="wifiSsid" autocomplete="off">
+              </label>
+              <label>Wi-Fi Password
+                <input id="wifiPassword" type="password" autocomplete="new-password">
+              </label>
+            </div>
+            <div class="row">
+              <label>Access Point SSID
+                <input id="apSsid" autocomplete="off">
+              </label>
+              <label>Access Point Password
+                <input id="apPassword" type="password" autocomplete="new-password">
+              </label>
+            </div>
+          </form>
+        </div>
+
+        <div id="tab-mqtt" class="tab-panel" role="tabpanel">
+          <h2>MQTT</h2>
+          <form id="mqttForm">
+            <label class="check"><input id="mqttEnabled" type="checkbox"> Enable MQTT publishing</label>
+            <label>MQTT Host
+              <input id="mqttHost" autocomplete="off" placeholder="192.168.1.10">
+            </label>
+            <div class="row">
+              <label>MQTT Port
+                <input id="mqttPort" type="number" min="1" max="65535">
+              </label>
+              <label>Publish Interval (s)
+                <input id="publishIntervalSeconds" type="number" min="1" max="3600">
+              </label>
+            </div>
+            <div class="row">
+              <label>MQTT Username
+                <input id="mqttUser" autocomplete="off">
+              </label>
+              <label>MQTT Password
+                <input id="mqttPassword" type="password" autocomplete="new-password">
+              </label>
+            </div>
+            <label>Base Topic
+              <input id="mqttBaseTopic" autocomplete="off" placeholder="home/pressure-device">
+            </label>
+            <label class="check"><input id="mqttDiscoveryEnabled" type="checkbox"> Publish Home Assistant discovery entities</label>
+            <label>Discovery Prefix
+              <input id="mqttDiscoveryPrefix" autocomplete="off" placeholder="homeassistant">
+            </label>
+          </form>
+        </div>
+
+        <div id="tab-device" class="tab-panel" role="tabpanel">
+          <h2>Device Configuration</h2>
+          <form id="deviceForm">
+            <div class="row">
+              <label>Device Name
+                <input id="deviceName" autocomplete="off">
+              </label>
+              <label>Max Pressure (kPa)
+                <input id="sensorMaxPressureKPa" type="number" step="0.1">
+              </label>
+            </div>
+            <div class="row">
+              <label>Sensor Min Voltage (V)
+                <input id="sensorMinVoltage" type="number" step="0.01">
+              </label>
+              <label>Sensor Max Voltage (V)
+                <input id="sensorMaxVoltage" type="number" step="0.01">
+              </label>
+            </div>
+            <div class="row">
+              <label>Alarm Threshold (kPa)
+                <input id="buzzerAlarmThresholdKPa" type="number" step="0.1">
+              </label>
+              <label class="check"><input id="buzzerEnabled" type="checkbox"> Enable buzzer alarm</label>
+            </div>
+          </form>
+        </div>
+
+        <div id="tab-oled" class="tab-panel" role="tabpanel">
+          <h2>OLED Configuration</h2>
+          <form id="oledForm">
+            <div class="row">
+              <label>OLED Contrast
+                <input id="oledContrast" type="number" min="1" max="255">
+              </label>
+              <label class="check"><input id="oledFlip" type="checkbox"> Rotate OLED 180°</label>
+            </div>
+            <p class="note">Current layout is fixed to top IP, large center pressure in bar, and MQTT status on the bottom line.</p>
+          </form>
+        </div>
+
+        <div class="actions">
+          <button id="saveBtn" type="button">Save Configuration</button>
+          <button id="restartBtn" type="button" class="secondary">Restart Device</button>
+        </div>
+        <p id="message"></p>
+      </section>
+    </div>
+  </div>
+
+  <script>
+    const fields = [
+      "deviceName", "apSsid", "apPassword", "wifiSsid", "wifiPassword",
+      "mqttHost", "mqttPort", "mqttUser", "mqttPassword", "mqttBaseTopic",
+      "mqttDiscoveryPrefix", "sensorMinVoltage",
+      "sensorMaxVoltage", "sensorMaxPressureKPa", "buzzerAlarmThresholdKPa",
+      "publishIntervalSeconds", "oledContrast"
+    ];
+
+    const checkboxes = ["mqttEnabled", "mqttDiscoveryEnabled", "buzzerEnabled", "oledFlip"];
+    const tabButtons = Array.from(document.querySelectorAll(".tab-button"));
+    const tabPanels = Array.from(document.querySelectorAll(".tab-panel"));
+
+    function activateTab(tabName) {
+      tabButtons.forEach((button) => {
+        const isActive = button.dataset.tab === tabName;
+        button.setAttribute("aria-selected", isActive ? "true" : "false");
+      });
+
+      tabPanels.forEach((panel) => {
+        panel.classList.toggle("active", panel.id === `tab-${tabName}`);
+      });
+    }
+
+    async function fetchJson(url, options) {
+      const response = await fetch(url, options);
+      if (!response.ok) {
+        let errorText = response.statusText;
+        try {
+          const payload = await response.json();
+          errorText = payload.error || payload.message || errorText;
+        } catch (_) {
+        }
+        throw new Error(errorText);
+      }
+      return response.json();
+    }
+
+    function setMessage(text, isError = false) {
+      const message = document.getElementById("message");
+      message.textContent = text;
+      message.style.color = isError ? "#b91c1c" : "#115e59";
+    }
+
+    function loadForm(config) {
+      fields.forEach((id) => {
+        const element = document.getElementById(id);
+        if (element) {
+          element.value = config[id] ?? "";
+        }
+      });
+      checkboxes.forEach((id) => {
+        const element = document.getElementById(id);
+        if (element) {
+          element.checked = Boolean(config[id]);
+        }
+      });
+      document.getElementById("deviceTitle").textContent = config.deviceName || "ESP Pressure Transducer";
+    }
+
+    function readForm() {
+      const payload = {};
+      fields.forEach((id) => {
+        payload[id] = document.getElementById(id).value;
+      });
+      ["mqttPort", "publishIntervalSeconds"].forEach((id) => {
+        payload[id] = Number(payload[id]);
+      });
+      ["sensorMinVoltage", "sensorMaxVoltage", "sensorMaxPressureKPa", "buzzerAlarmThresholdKPa", "oledContrast"].forEach((id) => {
+        payload[id] = Number(payload[id]);
+      });
+      checkboxes.forEach((id) => {
+        payload[id] = document.getElementById(id).checked;
+      });
+      return payload;
+    }
+
+    function formatUptime(seconds) {
+      const days = Math.floor(seconds / 86400);
+      const hours = Math.floor((seconds % 86400) / 3600);
+      const minutes = Math.floor((seconds % 3600) / 60);
+      return `${days}d ${hours}h ${minutes}m`;
+    }
+
+    function updateStatus(status) {
+      document.getElementById("pressureValue").textContent = `${status.pressureKPa} kPa`;
+      document.getElementById("barValue").textContent = `${status.pressureBar} bar`;
+      document.getElementById("sensorVoltage").textContent = `${status.sensorVoltage} V`;
+      document.getElementById("connectionState").textContent = status.wifiConnected ? "Wi-Fi linked" : "AP only";
+      document.getElementById("wifiStatus").textContent = status.wifiConnected ? status.wifiSsid : "Not connected";
+      document.getElementById("ipAddress").textContent = status.ipAddress;
+      document.getElementById("apInfo").textContent = `${status.apSsid} @ ${status.apIp}`;
+      document.getElementById("mqttStatus").textContent = status.mqttConnected ? `Connected to ${status.mqttHost || "broker"}` : "Disconnected";
+      document.getElementById("rawAdc").textContent = status.rawAdc;
+      document.getElementById("alarmStatus").textContent = status.alarmActive ? "Active" : "Normal";
+      document.getElementById("uptime").textContent = formatUptime(status.uptimeSeconds);
+    }
+
+    async function refreshConfig() {
+      const config = await fetchJson("/api/config");
+      loadForm(config);
+    }
+
+    async function refreshStatus() {
+      const status = await fetchJson("/api/status");
+      updateStatus(status);
+    }
+
+    async function saveConfiguration() {
+      setMessage("Saving configuration...");
+      try {
+        const payload = readForm();
+        const response = await fetchJson("/api/config", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+        setMessage(response.message || "Configuration saved.");
+      } catch (error) {
+        setMessage(error.message, true);
+      }
+    }
+
+    async function restartDevice() {
+      setMessage("Restarting device...");
+      try {
+        const response = await fetchJson("/api/restart", { method: "POST" });
+        setMessage(response.message || "Restart scheduled.");
+      } catch (error) {
+        setMessage(error.message, true);
+      }
+    }
+
+    document.getElementById("saveBtn").addEventListener("click", saveConfiguration);
+    document.getElementById("restartBtn").addEventListener("click", restartDevice);
+    tabButtons.forEach((button) => button.addEventListener("click", () => activateTab(button.dataset.tab)));
+
+    refreshConfig().catch((error) => setMessage(error.message, true));
+    refreshStatus().catch((error) => setMessage(error.message, true));
+    setInterval(() => refreshStatus().catch(() => {}), 3000);
+  </script>
+</body>
+</html>

@@ -1,0 +1,72 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "PlatformIO: Build",
+      "type": "process",
+      "command": "${env:USERPROFILE}\\.platformio\\penv\\Scripts\\platformio.exe",
+      "args": [
+        "run"
+      ],
+      "problemMatcher": [
+        "$platformio"
+      ],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      }
+    },
+    {
+      "label": "PlatformIO: Upload",
+      "type": "process",
+      "command": "${env:USERPROFILE}\\.platformio\\penv\\Scripts\\platformio.exe",
+      "args": [
+        "run",
+        "--target",
+        "upload"
+      ],
+      "problemMatcher": [
+        "$platformio"
+      ],
+      "group": "none"
+    },
+    {
+      "label": "PlatformIO: Upload Filesystem",
+      "type": "process",
+      "command": "${env:USERPROFILE}\\.platformio\\penv\\Scripts\\platformio.exe",
+      "args": [
+        "run",
+        "--target",
+        "uploadfs"
+      ],
+      "problemMatcher": [
+        "$platformio"
+      ],
+      "group": "none"
+    },
+    {
+      "label": "PlatformIO: Monitor",
+      "type": "process",
+      "command": "${env:USERPROFILE}\\.platformio\\penv\\Scripts\\platformio.exe",
+      "args": [
+        "device",
+        "monitor"
+      ],
+      "problemMatcher": []
+    },
+    {
+      "label": "PlatformIO: Clean",
+      "type": "process",
+      "command": "${env:USERPROFILE}\\.platformio\\penv\\Scripts\\platformio.exe",
+      "args": [
+        "run",
+        "--target",
+        "clean"
+      ],
+      "problemMatcher": [
+        "$platformio"
+      ],
+      "group": "none"
+    }
+  ]
+}
