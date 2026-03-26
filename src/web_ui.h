@@ -1,9 +1,8 @@
-#pragma once
+﻿#pragma once
 
 namespace {
 
-const char INDEX_HTML[] PROGMEM = R"rawliteral(
-<!DOCTYPE html>
+const char INDEX_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -299,6 +298,91 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
       margin-top: 8px;
     }
 
+    .firmware-summary {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 10px;
+      margin-bottom: 14px;
+    }
+
+    .firmware-card {
+      padding: 12px;
+      border-radius: 10px;
+      background: var(--panel-soft);
+      border: 1px solid var(--line);
+    }
+
+    .firmware-card strong {
+      display: block;
+      margin-top: 4px;
+      font-size: 1rem;
+    }
+
+    .firmware-list {
+      display: grid;
+      gap: 8px;
+      margin-top: 12px;
+    }
+
+    .firmware-item {
+      display: grid;
+      grid-template-columns: auto 1fr auto;
+      gap: 10px;
+      align-items: center;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: #fbfbfb;
+    }
+
+    .firmware-meta {
+      display: grid;
+      gap: 4px;
+    }
+
+    .firmware-title {
+      font-weight: 700;
+    }
+
+    .firmware-subtitle {
+      font-size: 0.82rem;
+      color: var(--muted);
+    }
+
+    .badge-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      justify-content: flex-end;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      min-height: 22px;
+      padding: 0 8px;
+      border-radius: 999px;
+      font-size: 0.76rem;
+      font-weight: 700;
+      background: #ececec;
+      color: #555555;
+    }
+
+    .badge.new {
+      background: #fff2cc;
+      color: #9a6700;
+    }
+
+    .badge.current {
+      background: #dcfce7;
+      color: #166534;
+    }
+
+    .badge.latest {
+      background: #dbeafe;
+      color: #1d4ed8;
+    }
+
     .status-item {
       display: flex;
       justify-content: space-between;
@@ -434,6 +518,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
           <button class="tab-button" type="button" role="tab" aria-selected="false" aria-controls="tab-mqtt" data-tab="mqtt">MQTT</button>
           <button class="tab-button" type="button" role="tab" aria-selected="false" aria-controls="tab-calibration" data-tab="calibration">Calibration</button>
           <button class="tab-button" type="button" role="tab" aria-selected="false" aria-controls="tab-oled" data-tab="oled">OLED</button>
+          <button class="tab-button" type="button" role="tab" aria-selected="false" aria-controls="tab-firmware" data-tab="firmware">Firmware</button>
         </div>
 
         <div id="tab-device" class="tab-panel active" role="tabpanel">
@@ -582,7 +667,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
               <label>OLED Contrast
                 <input id="oledContrast" type="number" min="1" max="255">
               </label>
-              <label class="check"><input id="oledFlip" type="checkbox"> Rotate OLED 180°</label>
+              <label class="check"><input id="oledFlip" type="checkbox"> Rotate OLED 180 deg</label>
             </div>
             <div class="row">
               <label>Top Row
@@ -612,6 +697,31 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
           </form>
         </div>
 
+        <div id="tab-firmware" class="tab-panel" role="tabpanel">
+          <h2>Firmware</h2>
+          <div class="firmware-summary">
+            <div class="firmware-card">
+              <div class="stat-label">Current Firmware</div>
+              <strong id="currentFirmwareVersion">-</strong>
+            </div>
+            <div class="firmware-card">
+              <div class="stat-label">Latest Release</div>
+              <strong id="latestFirmwareVersion">-</strong>
+            </div>
+            <div class="firmware-card">
+              <div class="stat-label">Update Status</div>
+              <strong id="firmwareStatusText">Idle</strong>
+            </div>
+          </div>
+          <div class="inline-actions">
+            <button id="refreshFirmwareBtn" type="button" class="secondary">Check Releases</button>
+            <button id="updateFirmwareBtn" type="button">Update Selected</button>
+            <span id="firmwareSelectionLabel" class="scan-status">No firmware selected</span>
+          </div>
+          <div id="firmwareList" class="firmware-list"></div>
+          <p class="note">OTA updates download release assets from GitHub. The device updates LittleFS first when available, then flashes the selected firmware release.</p>
+        </div>
+
         <div class="actions">
           <button id="saveBtn" type="button">Save Configuration</button>
           <button id="restartBtn" type="button" class="secondary">Restart Device</button>
@@ -637,6 +747,8 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
     const tabPanels = Array.from(document.querySelectorAll(".tab-panel"));
     const wifiNetworkList = document.getElementById("wifiNetworkList");
     const passwordToggles = Array.from(document.querySelectorAll(".password-toggle"));
+    const firmwareList = document.getElementById("firmwareList");
+    let firmwareBusy = false;
 
     function activateTab(tabName) {
       tabButtons.forEach((button) => {
@@ -647,6 +759,10 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
       tabPanels.forEach((panel) => {
         panel.classList.toggle("active", panel.id === `tab-${tabName}`);
       });
+
+      if (tabName === "firmware") {
+        refreshFirmwareInfo().catch((error) => setMessage(error.message, true));
+      }
     }
 
     async function fetchJson(url, options) {
@@ -711,6 +827,99 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
       document.getElementById("deviceTitle").textContent = "ESP8266 Pressure Monitor";
     }
 
+    function selectedFirmwareVersion() {
+      const selected = document.querySelector('input[name="firmwareVersion"]:checked');
+      return selected ? selected.value : "";
+    }
+
+    function updateFirmwareSelectionLabel() {
+      const selected = selectedFirmwareVersion();
+      document.getElementById("firmwareSelectionLabel").textContent = selected ? `Selected: ${selected}` : "No firmware selected";
+    }
+
+    function renderFirmwareList(releases, currentVersion, latestVersion, selectedVersion) {
+      firmwareList.innerHTML = "";
+
+      if (!releases.length) {
+        firmwareList.innerHTML = '<div class="note">No GitHub firmware releases found.</div>';
+        updateFirmwareSelectionLabel();
+        return;
+      }
+
+      releases.forEach((release, index) => {
+        const item = document.createElement("label");
+        item.className = "firmware-item";
+
+        const radio = document.createElement("input");
+        radio.type = "radio";
+        radio.name = "firmwareVersion";
+        radio.value = release.tag;
+        radio.checked = Boolean(
+          (selectedVersion && release.tag === selectedVersion) ||
+          (!selectedVersion && (release.isLatest || (!latestVersion && index === 0)))
+        );
+        radio.addEventListener("change", updateFirmwareSelectionLabel);
+
+        const meta = document.createElement("div");
+        meta.className = "firmware-meta";
+
+        const title = document.createElement("div");
+        title.className = "firmware-title";
+        title.textContent = release.name || release.tag;
+
+        const subtitle = document.createElement("div");
+        subtitle.className = "firmware-subtitle";
+        subtitle.textContent = `${release.tag} - ${release.publishedAt || "unknown date"}${release.hasFilesystem ? " - firmware + LittleFS" : " - firmware only"}`;
+
+        meta.appendChild(title);
+        meta.appendChild(subtitle);
+
+        const badges = document.createElement("div");
+        badges.className = "badge-row";
+
+        if (release.isCurrent || release.tag === currentVersion) {
+          const badge = document.createElement("span");
+          badge.className = "badge current";
+          badge.textContent = "Installed";
+          badges.appendChild(badge);
+        }
+
+        if (release.isLatest || release.tag === latestVersion) {
+          const badge = document.createElement("span");
+          badge.className = `badge ${release.isNew ? "new" : "latest"}`;
+          badge.textContent = release.isNew ? "New" : "Latest";
+          badges.appendChild(badge);
+        }
+
+        if (release.prerelease) {
+          const badge = document.createElement("span");
+          badge.className = "badge";
+          badge.textContent = "Pre-release";
+          badges.appendChild(badge);
+        }
+
+        item.appendChild(radio);
+        item.appendChild(meta);
+        item.appendChild(badges);
+        firmwareList.appendChild(item);
+      });
+
+      updateFirmwareSelectionLabel();
+    }
+
+    function updateFirmwarePanel(info) {
+      const currentVersion = info.currentVersion || "-";
+      const latestVersion = info.latestVersion || "No release";
+      document.getElementById("currentFirmwareVersion").textContent = currentVersion;
+      document.getElementById("latestFirmwareVersion").textContent = latestVersion;
+      document.getElementById("firmwareStatusText").textContent = info.updateStatus || "Idle";
+      firmwareBusy = Boolean(info.updateBusy);
+      renderFirmwareList(Array.isArray(info.releases) ? info.releases : [], currentVersion, info.latestVersion || "", info.selectedVersion || "");
+      if (info.error) {
+        setMessage(info.error, true);
+      }
+    }
+
     function readForm() {
       const payload = {};
       fields.forEach((id) => {
@@ -759,6 +968,11 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
       updateStatus(status);
     }
 
+    async function refreshFirmwareInfo() {
+      const info = await fetchJson("/api/firmware");
+      updateFirmwarePanel(info);
+    }
+
     async function scanWifiNetworks() {
       const button = document.getElementById("scanWifiBtn");
       button.disabled = true;
@@ -801,9 +1015,33 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
       }
     }
 
+    async function updateFirmware() {
+      const version = selectedFirmwareVersion();
+      if (!version) {
+        setMessage("Select a firmware release first.", true);
+        return;
+      }
+
+      setMessage(`Starting OTA update to ${version}...`);
+
+      try {
+        const response = await fetchJson("/api/firmware/update", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ version })
+        });
+        setMessage(response.message || `Update queued for ${version}.`);
+        await refreshFirmwareInfo();
+      } catch (error) {
+        setMessage(error.message, true);
+      }
+    }
+
     document.getElementById("saveBtn").addEventListener("click", saveConfiguration);
     document.getElementById("restartBtn").addEventListener("click", restartDevice);
     document.getElementById("scanWifiBtn").addEventListener("click", scanWifiNetworks);
+    document.getElementById("refreshFirmwareBtn").addEventListener("click", () => refreshFirmwareInfo().catch((error) => setMessage(error.message, true)));
+    document.getElementById("updateFirmwareBtn").addEventListener("click", updateFirmware);
     wifiNetworkList.addEventListener("change", () => {
       if (wifiNetworkList.value) {
         document.getElementById("wifiSsid").value = wifiNetworkList.value;
@@ -821,11 +1059,16 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
 
     refreshConfig().catch((error) => setMessage(error.message, true));
     refreshStatus().catch((error) => setMessage(error.message, true));
+    refreshFirmwareInfo().catch(() => {});
     setInterval(() => refreshStatus().catch(() => {}), 3000);
+    setInterval(() => {
+      if (firmwareBusy || document.getElementById("tab-firmware").classList.contains("active")) {
+        refreshFirmwareInfo().catch(() => {});
+      }
+    }, 5000);
   </script>
 </body>
 </html>
-
 )rawliteral";
 
 }  // namespace

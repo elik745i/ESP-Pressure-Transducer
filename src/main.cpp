@@ -2,15 +2,24 @@
 #include <LittleFS.h>
 #include <ArduinoJson.h>
 #include <DNSServer.h>
+#include <ESP8266HTTPClient.h>
 #include <ESP8266WebServer.h>
 #include <ESP8266WiFi.h>
+#include <ESP8266httpUpdate.h>
 #include <PubSubClient.h>
 #include <U8g2lib.h>
+#include <WiFiClientSecureBearSSL.h>
 #include "web_ui.h"
 
 namespace {
 
 constexpr char CONFIG_PATH[] = "/config.json";
+constexpr char FIRMWARE_VERSION[] = "v1.1.0";
+constexpr char GITHUB_OWNER[] = "elik745i";
+constexpr char GITHUB_REPO[] = "ESP-Pressure-Transducer";
+constexpr char GITHUB_RELEASES_API_URL[] = "https://api.github.com/repos/elik745i/ESP-Pressure-Transducer/releases?per_page=10";
+constexpr char GITHUB_FIRMWARE_ASSET_NAME[] = "firmware.bin";
+constexpr char GITHUB_FILESYSTEM_ASSET_NAME[] = "littlefs.bin";
 constexpr uint8_t BUZZER_PIN = D5;
 constexpr uint8_t STATUS_LED_PIN = LED_BUILTIN;
 constexpr uint16_t DNS_PORT = 53;
@@ -81,6 +90,14 @@ bool mqttDiscoveryPublished = false;
 bool wasWifiConnected = false;
 bool wasMqttConnected = false;
 bool accessPointEnabled = false;
+bool otaUpdateRequested = false;
+bool otaUpdateRunning = false;
+uint8_t otaProgressPercent = 0;
+String otaStatusMessage = "Idle";
+String otaUpdateVersion = "";
+String otaFirmwareUrl = "";
+String otaFilesystemUrl = "";
+String otaCurrentPhase = "";
 
 enum class LedPattern {
   Booting,
@@ -90,6 +107,8 @@ enum class LedPattern {
   WifiAndMqttConnected,
   RestartPending,
 };
+
+void scheduleRestart(unsigned long delayMs);
 
 String defaultDeviceName() {
   return String("pressure-") + String(ESP.getChipId(), HEX);
@@ -331,13 +350,112 @@ String uniqueIdBase() {
   return id;
 }
 
+String githubUserAgent() {
+  return String("ESP-Pressure-Transducer/") + FIRMWARE_VERSION;
+}
+
+String normalizedReleaseDate(const String &publishedAt) {
+  return publishedAt.length() >= 10 ? publishedAt.substring(0, 10) : publishedAt;
+}
+
+bool fetchGithubReleases(JsonDocument &doc, String &errorMessage) {
+  if (!WiFi.isConnected()) {
+    errorMessage = "Connect to Wi-Fi to check GitHub releases.";
+    return false;
+  }
+
+  BearSSL::WiFiClientSecure client;
+  client.setInsecure();
+  client.setTimeout(15000);
+
+  HTTPClient https;
+  https.setReuse(false);
+  https.setTimeout(15000);
+  https.setUserAgent(githubUserAgent());
+
+  if (!https.begin(client, GITHUB_RELEASES_API_URL)) {
+    errorMessage = "Failed to open GitHub releases API.";
+    return false;
+  }
+
+  https.addHeader("Accept", "application/vnd.github+json");
+  https.addHeader("X-GitHub-Api-Version", "2022-11-28");
+
+  const int statusCode = https.GET();
+  if (statusCode != HTTP_CODE_OK) {
+    errorMessage = String("GitHub API error: HTTP ") + statusCode;
+    https.end();
+    return false;
+  }
+
+  JsonDocument filter;
+  JsonObject releaseFilter = filter.add<JsonObject>();
+  releaseFilter["tag_name"] = true;
+  releaseFilter["name"] = true;
+  releaseFilter["draft"] = true;
+  releaseFilter["prerelease"] = true;
+  releaseFilter["published_at"] = true;
+  JsonArray assetsFilter = releaseFilter["assets"].to<JsonArray>();
+  JsonObject assetFilter = assetsFilter.add<JsonObject>();
+  assetFilter["name"] = true;
+  assetFilter["browser_download_url"] = true;
+
+  doc.clear();
+  DeserializationError error = deserializeJson(doc, https.getStream(), DeserializationOption::Filter(filter));
+  https.end();
+
+  if (error) {
+    errorMessage = String("GitHub response parse failed: ") + error.c_str();
+    return false;
+  }
+
+  return true;
+}
+
+bool resolveReleaseAssets(const String &tagName, String &firmwareUrl, String &filesystemUrl, String &errorMessage) {
+  JsonDocument releases;
+  if (!fetchGithubReleases(releases, errorMessage)) {
+    return false;
+  }
+
+  for (JsonObject release : releases.as<JsonArray>()) {
+    const String releaseTag = String(static_cast<const char *>(release["tag_name"] | ""));
+    if (releaseTag != tagName || (release["draft"] | false)) {
+      continue;
+    }
+
+    firmwareUrl = "";
+    filesystemUrl = "";
+
+    for (JsonObject asset : release["assets"].as<JsonArray>()) {
+      const String assetName = String(static_cast<const char *>(asset["name"] | ""));
+      const String assetUrl = String(static_cast<const char *>(asset["browser_download_url"] | ""));
+      if (assetName == GITHUB_FIRMWARE_ASSET_NAME) {
+        firmwareUrl = assetUrl;
+      } else if (assetName == GITHUB_FILESYSTEM_ASSET_NAME) {
+        filesystemUrl = assetUrl;
+      }
+    }
+
+    if (firmwareUrl.isEmpty()) {
+      errorMessage = "Selected release has no firmware.bin asset.";
+      return false;
+    }
+
+    return true;
+  }
+
+  errorMessage = "Selected firmware release was not found on GitHub.";
+  return false;
+}
+
 void fillDiscoveryDevice(JsonObject device) {
   JsonArray ids = device["ids"].to<JsonArray>();
   ids.add(uniqueIdBase());
   device["name"] = config.deviceName;
   device["mf"] = "DIY";
   device["mdl"] = "Wemos D1 mini pressure transducer";
-  device["sw"] = "1.0.0";
+  device["sw"] = FIRMWARE_VERSION;
 }
 
 float clampFloat(float value, float low, float high) {
@@ -410,6 +528,91 @@ void playMqttConnectedMelody() {
   constexpr uint16_t frequencies[] = {1560, 2080, 1560, 3120};
   constexpr uint16_t durations[] = {70, 70, 70, 150};
   playMelody(frequencies, durations, 4, true);
+}
+
+void configureOtaCallbacks() {
+  ESPhttpUpdate.rebootOnUpdate(false);
+  ESPhttpUpdate.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
+  ESPhttpUpdate.setLedPin(STATUS_LED_PIN, LOW);
+  ESPhttpUpdate.onStart([]() {
+    otaUpdateRunning = true;
+    otaProgressPercent = 0;
+    otaStatusMessage = otaCurrentPhase + " update started...";
+  });
+  ESPhttpUpdate.onProgress([](int current, int total) {
+    otaProgressPercent = total > 0 ? static_cast<uint8_t>((current * 100) / total) : 0;
+    otaStatusMessage = otaCurrentPhase + " update " + String(otaProgressPercent) + "%";
+    yield();
+  });
+  ESPhttpUpdate.onEnd([]() {
+    otaProgressPercent = 100;
+    otaStatusMessage = otaCurrentPhase + " update completed.";
+  });
+  ESPhttpUpdate.onError([](int) {
+    otaUpdateRunning = false;
+    otaUpdateRequested = false;
+    otaProgressPercent = 0;
+    otaStatusMessage = String("Update failed: ") + ESPhttpUpdate.getLastErrorString();
+  });
+}
+
+t_httpUpdate_return runHttpUpdate(const String &url, bool updateFilesystem) {
+  BearSSL::WiFiClientSecure client;
+  client.setInsecure();
+  client.setTimeout(30000);
+
+  if (updateFilesystem) {
+    otaCurrentPhase = "Filesystem";
+    return ESPhttpUpdate.updateFS(client, url);
+  }
+
+  otaCurrentPhase = "Firmware";
+  return ESPhttpUpdate.update(client, url, FIRMWARE_VERSION);
+}
+
+void performQueuedOtaUpdate() {
+  if (!otaUpdateRequested || otaUpdateRunning) {
+    return;
+  }
+
+  if (!WiFi.isConnected()) {
+    otaUpdateRequested = false;
+    otaStatusMessage = "Update canceled because Wi-Fi is disconnected.";
+    return;
+  }
+
+  otaUpdateRequested = false;
+  otaUpdateRunning = true;
+  otaStatusMessage = "Preparing update " + otaUpdateVersion + "...";
+  otaProgressPercent = 0;
+
+  if (!otaFilesystemUrl.isEmpty()) {
+    const t_httpUpdate_return fsResult = runHttpUpdate(otaFilesystemUrl, true);
+    if (fsResult != HTTP_UPDATE_OK) {
+      otaUpdateRunning = false;
+      otaProgressPercent = 0;
+      if (!otaStatusMessage.startsWith("Update failed:")) {
+        otaStatusMessage = String("Filesystem update failed: ") + ESPhttpUpdate.getLastErrorString();
+      }
+      return;
+    }
+  }
+
+  const t_httpUpdate_return firmwareResult = runHttpUpdate(otaFirmwareUrl, false);
+  if (firmwareResult != HTTP_UPDATE_OK) {
+    otaUpdateRunning = false;
+    otaProgressPercent = 0;
+    if (!otaStatusMessage.startsWith("Update failed:")) {
+      otaStatusMessage = String("Firmware update failed: ") + ESPhttpUpdate.getLastErrorString();
+    }
+    return;
+  }
+
+  otaUpdateRunning = false;
+  otaProgressPercent = 100;
+  otaCurrentPhase = "";
+  otaStatusMessage = "Firmware " + otaUpdateVersion + " installed. Restarting...";
+  scheduleRestart(1500);
 }
 
 void setStatusLed(bool on) {
@@ -648,6 +851,7 @@ void publishState() {
 
   JsonDocument doc;
   doc["device_name"] = config.deviceName;
+  doc["firmware_version"] = FIRMWARE_VERSION;
   doc["pressure_bar"] = serialized(String(sensorState.pressureBar, 2));
   doc["pressure_kpa"] = serialized(String(sensorState.pressureKPa, 1));
   doc["sensor_voltage"] = serialized(String(sensorState.sensorVoltage, 3));
@@ -723,6 +927,7 @@ void sendJsonConfig() {
 void sendStatus() {
   JsonDocument doc;
   doc["deviceName"] = config.deviceName;
+  doc["firmwareVersion"] = FIRMWARE_VERSION;
   doc["wifiConnected"] = WiFi.isConnected();
   doc["wifiSsid"] = WiFi.isConnected() ? WiFi.SSID() : "";
   doc["ipAddress"] = localIpString();
@@ -760,6 +965,126 @@ void sendWifiScanResults() {
 
   String payload;
   serializeJson(doc, payload);
+  server.send(200, "application/json", payload);
+}
+
+void sendFirmwareInfo() {
+  JsonDocument response;
+  response["currentVersion"] = FIRMWARE_VERSION;
+  response["updateStatus"] = otaStatusMessage;
+  response["updateBusy"] = otaUpdateRunning || otaUpdateRequested;
+  response["updateProgress"] = otaProgressPercent;
+  response["selectedVersion"] = otaUpdateVersion;
+
+  JsonArray releasesOut = response["releases"].to<JsonArray>();
+  JsonDocument releases;
+  String errorMessage;
+  if (!fetchGithubReleases(releases, errorMessage)) {
+    response["error"] = errorMessage;
+    String payload;
+    serializeJson(response, payload);
+    server.send(200, "application/json", payload);
+    return;
+  }
+
+  String latestVersion;
+  for (JsonObject release : releases.as<JsonArray>()) {
+    if (release["draft"] | false) {
+      continue;
+    }
+
+    String firmwareUrl;
+    String filesystemUrl;
+    for (JsonObject asset : release["assets"].as<JsonArray>()) {
+      const String assetName = String(static_cast<const char *>(asset["name"] | ""));
+      const String assetUrl = String(static_cast<const char *>(asset["browser_download_url"] | ""));
+      if (assetName == GITHUB_FIRMWARE_ASSET_NAME) {
+        firmwareUrl = assetUrl;
+      } else if (assetName == GITHUB_FILESYSTEM_ASSET_NAME) {
+        filesystemUrl = assetUrl;
+      }
+    }
+
+    if (firmwareUrl.isEmpty()) {
+      continue;
+    }
+
+    const String tagName = String(static_cast<const char *>(release["tag_name"] | ""));
+    if (latestVersion.isEmpty()) {
+      latestVersion = tagName;
+    }
+
+    JsonObject item = releasesOut.add<JsonObject>();
+    item["tag"] = tagName;
+    item["name"] = String(static_cast<const char *>(release["name"] | tagName.c_str()));
+    item["publishedAt"] = normalizedReleaseDate(String(static_cast<const char *>(release["published_at"] | "")));
+    item["prerelease"] = release["prerelease"] | false;
+    item["hasFilesystem"] = !filesystemUrl.isEmpty();
+    item["isCurrent"] = tagName == FIRMWARE_VERSION;
+    item["isLatest"] = false;
+    item["isNew"] = false;
+  }
+
+  response["latestVersion"] = latestVersion;
+  response["updateAvailable"] = !latestVersion.isEmpty() && latestVersion != FIRMWARE_VERSION;
+
+  for (JsonObject item : releasesOut) {
+    const String tagName = String(static_cast<const char *>(item["tag"] | ""));
+    const bool isLatest = tagName == latestVersion;
+    item["isLatest"] = isLatest;
+    item["isNew"] = isLatest && tagName != FIRMWARE_VERSION;
+  }
+
+  String payload;
+  serializeJson(response, payload);
+  server.send(200, "application/json", payload);
+}
+
+void handleFirmwareUpdatePost() {
+  if (otaUpdateRunning || otaUpdateRequested) {
+    server.send(409, "application/json", "{\"error\":\"Another update is already in progress\"}");
+    return;
+  }
+
+  JsonDocument doc;
+  DeserializationError error = deserializeJson(doc, server.arg("plain"));
+  if (error) {
+    server.send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
+    return;
+  }
+
+  const String requestedVersion = String(static_cast<const char *>(doc["version"] | ""));
+  if (requestedVersion.isEmpty()) {
+    server.send(400, "application/json", "{\"error\":\"Firmware version is required\"}");
+    return;
+  }
+
+  String firmwareUrl;
+  String filesystemUrl;
+  String errorMessage;
+  if (!resolveReleaseAssets(requestedVersion, firmwareUrl, filesystemUrl, errorMessage)) {
+    JsonDocument response;
+    response["error"] = errorMessage;
+    String payload;
+    serializeJson(response, payload);
+    server.send(502, "application/json", payload);
+    return;
+  }
+
+  otaUpdateVersion = requestedVersion;
+  otaFirmwareUrl = firmwareUrl;
+  otaFilesystemUrl = filesystemUrl;
+  otaUpdateRequested = true;
+  otaUpdateRunning = false;
+  otaProgressPercent = 0;
+  otaCurrentPhase = "";
+  otaStatusMessage = "Update queued for " + requestedVersion + ".";
+
+  JsonDocument response;
+  response["ok"] = true;
+  response["message"] = "Starting OTA update to " + requestedVersion;
+  String payload;
+  serializeJson(response, payload);
   server.send(200, "application/json", payload);
 }
 
@@ -898,6 +1223,8 @@ void configureWebServer() {
   server.on("/api/config", HTTP_POST, handleConfigPost);
   server.on("/api/status", HTTP_GET, sendStatus);
   server.on("/api/wifi/scan", HTTP_GET, sendWifiScanResults);
+  server.on("/api/firmware", HTTP_GET, sendFirmwareInfo);
+  server.on("/api/firmware/update", HTTP_POST, handleFirmwareUpdatePost);
   server.on("/api/restart", HTTP_POST, handleRestartPost);
   server.onNotFound(handleNotFound);
   server.begin();
@@ -933,6 +1260,7 @@ void setupApp() {
 
   connectWifi();
   mqttClient.setBufferSize(768);
+  configureOtaCallbacks();
   configureWebServer();
 }
 
@@ -940,6 +1268,8 @@ void loopApp() {
   if (accessPointEnabled) {
     dnsServer.processNextRequest();
   }
+
+  performQueuedOtaUpdate();
   server.handleClient();
 
   const unsigned long now = millis();
