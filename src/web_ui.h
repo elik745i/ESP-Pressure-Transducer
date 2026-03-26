@@ -104,6 +104,16 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
       color: #2d2d2d;
     }
 
+    #connectionState {
+      font-size: clamp(0.95rem, 2vw, 1.2rem);
+      line-height: 1.2;
+      min-height: 2.4em;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      text-wrap: balance;
+    }
+
     .grid {
       margin-top: 12px;
       display: grid;
@@ -1020,7 +1030,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
       document.getElementById("sensorVoltage").textContent = `${status.sensorVoltage} V`;
       document.getElementById("connectionState").textContent =
         status.wifiConnected
-          ? `Wi-Fi linked${status.mqttConnected ? " • MQTT linked" : " • MQTT offline"}`
+          ? `Wi-Fi linked${status.mqttConnected ? " / MQTT linked" : " / MQTT offline"}`
           : "AP only";
       document.getElementById("wifiStatus").textContent = status.wifiConnected ? status.wifiSsid : "Not connected";
       document.getElementById("ipAddress").textContent = status.ipAddress;
