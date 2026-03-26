@@ -15,9 +15,10 @@
 namespace {
 
 constexpr char CONFIG_PATH[] = "/config.json";
-constexpr char FIRMWARE_VERSION[] = "v1.1.4";
+constexpr char FIRMWARE_VERSION[] = "v1.1.5";
 constexpr char GITHUB_OWNER[] = "elik745i";
 constexpr char GITHUB_REPO[] = "ESP-Pressure-Transducer";
+constexpr char GITHUB_RELEASES_API_URL[] = "https://api.github.com/repos/elik745i/ESP-Pressure-Transducer/releases?per_page=10";
 constexpr char GITHUB_TAGS_API_URL[] = "https://api.github.com/repos/elik745i/ESP-Pressure-Transducer/tags?per_page=10";
 constexpr char GITHUB_FIRMWARE_ASSET_NAME[] = "firmware.bin";
 constexpr char GITHUB_FILESYSTEM_ASSET_NAME[] = "littlefs.bin";
@@ -120,6 +121,21 @@ String otaFirmwareUrl = "";
 String otaCurrentPhase = "";
 size_t otaProgressCurrentBytes = 0;
 size_t otaProgressTotalBytes = 0;
+const uint16_t *buzzerMelodyFrequencies = nullptr;
+const uint16_t *buzzerMelodyDurations = nullptr;
+size_t buzzerMelodyCount = 0;
+size_t buzzerMelodyIndex = 0;
+bool buzzerMelodyActive = false;
+bool buzzerTonePhase = false;
+unsigned long buzzerPhaseEndsAtMs = 0;
+constexpr uint16_t BOOT_MELODY_FREQUENCIES[] = {1960, 2470, 2940};
+constexpr uint16_t BOOT_MELODY_DURATIONS[] = {90, 90, 140};
+constexpr uint16_t WIFI_CONNECTED_MELODY_FREQUENCIES[] = {1760, 2200, 2620};
+constexpr uint16_t WIFI_CONNECTED_MELODY_DURATIONS[] = {90, 90, 130};
+constexpr uint16_t WIFI_DISCONNECTED_MELODY_FREQUENCIES[] = {2620, 1960, 1470};
+constexpr uint16_t WIFI_DISCONNECTED_MELODY_DURATIONS[] = {100, 100, 140};
+constexpr uint16_t MQTT_CONNECTED_MELODY_FREQUENCIES[] = {1560, 2080, 1560, 3120};
+constexpr uint16_t MQTT_CONNECTED_MELODY_DURATIONS[] = {70, 70, 70, 150};
 
 enum class LedPattern {
   Booting,
@@ -464,6 +480,21 @@ String githubReleaseAssetUrl(const String &tagName, const char *assetName) {
          "/releases/download/" + tagName + "/" + assetName;
 }
 
+String chooseReleaseAssetUrl(const JsonVariantConst &assets, const char *assetName) {
+  if (!assets.is<JsonArrayConst>()) {
+    return "";
+  }
+
+  for (JsonObjectConst asset : assets.as<JsonArrayConst>()) {
+    const String name = String(static_cast<const char *>(asset["name"] | ""));
+    const String url = String(static_cast<const char *>(asset["browser_download_url"] | ""));
+    if (name == assetName && !url.isEmpty()) {
+      return url;
+    }
+  }
+  return "";
+}
+
 bool fetchGithubTags(JsonDocument &doc, String &errorMessage) {
   if (!WiFi.isConnected()) {
     errorMessage = "Connect to Wi-Fi to check GitHub releases.";
@@ -472,38 +503,97 @@ bool fetchGithubTags(JsonDocument &doc, String &errorMessage) {
 
   BearSSL::WiFiClientSecure client;
   client.setInsecure();
-  client.setTimeout(15000);
+  client.setTimeout(12000);
 
-  HTTPClient https;
-  https.setReuse(false);
-  https.setTimeout(15000);
-  https.setUserAgent(githubUserAgent());
-
-  if (!https.begin(client, GITHUB_TAGS_API_URL)) {
-    errorMessage = "Failed to open GitHub tags API.";
+  HTTPClient http;
+  http.setReuse(false);
+  http.setTimeout(8000);
+  http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
+  if (!http.begin(client, GITHUB_TAGS_API_URL)) {
+    errorMessage = "Could not open GitHub tags API.";
     return false;
   }
 
-  https.addHeader("Accept", "application/vnd.github+json");
-  https.addHeader("X-GitHub-Api-Version", "2022-11-28");
+  http.addHeader("Accept", "application/vnd.github+json");
+  http.addHeader("User-Agent", githubUserAgent());
+  http.addHeader("X-GitHub-Api-Version", "2022-11-28");
 
-  const int statusCode = https.GET();
+  const int statusCode = http.GET();
   if (statusCode != HTTP_CODE_OK) {
     errorMessage = String("GitHub API error: HTTP ") + statusCode;
-    https.end();
+    http.end();
     return false;
   }
 
   JsonDocument filter;
-  JsonObject tagFilter = filter.add<JsonObject>();
+  JsonObject tagFilter = filter[0].to<JsonObject>();
   tagFilter["name"] = true;
 
   doc.clear();
-  DeserializationError error = deserializeJson(doc, https.getStream(), DeserializationOption::Filter(filter));
-  https.end();
-
+  DeserializationError error = deserializeJson(doc, http.getStream(), DeserializationOption::Filter(filter));
+  http.end();
   if (error) {
     errorMessage = String("GitHub tags parse failed: ") + error.c_str();
+    return false;
+  }
+  if (!doc.is<JsonArray>()) {
+    errorMessage = "GitHub tags response format invalid.";
+    return false;
+  }
+
+  return true;
+}
+
+bool fetchGithubReleases(JsonDocument &doc, String &errorMessage) {
+  if (!WiFi.isConnected()) {
+    errorMessage = "Connect to Wi-Fi to check GitHub releases.";
+    return false;
+  }
+
+  BearSSL::WiFiClientSecure client;
+  client.setInsecure();
+  client.setTimeout(12000);
+
+  HTTPClient http;
+  http.setReuse(false);
+  http.setTimeout(8000);
+  http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
+  if (!http.begin(client, GITHUB_RELEASES_API_URL)) {
+    errorMessage = "Could not open GitHub releases API.";
+    return false;
+  }
+
+  http.addHeader("Accept", "application/vnd.github+json");
+  http.addHeader("User-Agent", githubUserAgent());
+  http.addHeader("X-GitHub-Api-Version", "2022-11-28");
+
+  const int statusCode = http.GET();
+  if (statusCode != HTTP_CODE_OK) {
+    errorMessage = String("GitHub API error: HTTP ") + statusCode;
+    http.end();
+    return false;
+  }
+
+  JsonDocument filter;
+  JsonObject releaseFilter = filter[0].to<JsonObject>();
+  releaseFilter["tag_name"] = true;
+  releaseFilter["name"] = true;
+  releaseFilter["draft"] = true;
+  releaseFilter["prerelease"] = true;
+  releaseFilter["published_at"] = true;
+  JsonObject assetFilter = releaseFilter["assets"][0].to<JsonObject>();
+  assetFilter["name"] = true;
+  assetFilter["browser_download_url"] = true;
+
+  doc.clear();
+  DeserializationError error = deserializeJson(doc, http.getStream(), DeserializationOption::Filter(filter));
+  http.end();
+  if (error) {
+    errorMessage = String("GitHub response parse failed: ") + error.c_str();
+    return false;
+  }
+  if (!doc.is<JsonArray>()) {
+    errorMessage = "GitHub response format invalid.";
     return false;
   }
 
@@ -511,12 +601,42 @@ bool fetchGithubTags(JsonDocument &doc, String &errorMessage) {
 }
 
 bool resolveReleaseAssets(const String &tagName, String &firmwareUrl, String &filesystemUrl, String &errorMessage) {
+  JsonDocument releases;
+  if (fetchGithubReleases(releases, errorMessage)) {
+    for (JsonObjectConst release : releases.as<JsonArrayConst>()) {
+      const bool draft = release["draft"] | false;
+      const bool prerelease = release["prerelease"] | false;
+      if (draft || prerelease) {
+        continue;
+      }
+
+      const String releaseTag = String(static_cast<const char *>(release["tag_name"] | ""));
+      if (releaseTag != tagName) {
+        continue;
+      }
+
+      firmwareUrl = chooseReleaseAssetUrl(release["assets"], GITHUB_FIRMWARE_ASSET_NAME);
+      filesystemUrl = chooseReleaseAssetUrl(release["assets"], GITHUB_FILESYSTEM_ASSET_NAME);
+      if (firmwareUrl.isEmpty()) {
+        errorMessage = "Selected release has no firmware.bin asset.";
+        return false;
+      }
+      return true;
+    }
+  }
+
   JsonDocument tags;
-  if (!fetchGithubTags(tags, errorMessage)) {
+  String tagsError;
+  if (!fetchGithubTags(tags, tagsError)) {
+    if (errorMessage.isEmpty()) {
+      errorMessage = tagsError;
+    } else {
+      errorMessage += " Fallback failed: " + tagsError;
+    }
     return false;
   }
 
-  for (JsonObject tag : tags.as<JsonArray>()) {
+  for (JsonObjectConst tag : tags.as<JsonArrayConst>()) {
     const String releaseTag = String(static_cast<const char *>(tag["name"] | ""));
     if (releaseTag != tagName) {
       continue;
@@ -527,7 +647,7 @@ bool resolveReleaseAssets(const String &tagName, String &firmwareUrl, String &fi
     return true;
   }
 
-  errorMessage = "Selected firmware tag was not found on GitHub.";
+  errorMessage = "Selected firmware release was not found on GitHub.";
   return false;
 }
 
@@ -550,66 +670,83 @@ float clampFloat(float value, float low, float high) {
   return value;
 }
 
-void beep(uint16_t frequency, uint16_t durationMs) {
-  if (!config.buzzerEnabled) {
-    return;
-  }
-
-  tone(BUZZER_PIN, frequency, durationMs);
-  delay(durationMs + 30);
-  noTone(BUZZER_PIN);
-}
-
-void beepImmediate(uint16_t frequency, uint16_t durationMs) {
-  tone(BUZZER_PIN, frequency, durationMs);
-  delay(durationMs + 30);
-  noTone(BUZZER_PIN);
-}
-
-void playMelody(const uint16_t *frequencies, const uint16_t *durations, size_t noteCount, bool honorMute) {
+void startMelody(const uint16_t *frequencies, const uint16_t *durations, size_t noteCount, bool honorMute) {
   if (honorMute && !config.buzzerEnabled) {
     return;
   }
 
-  for (size_t index = 0; index < noteCount; ++index) {
-    const uint16_t frequency = frequencies[index];
-    const uint16_t duration = durations[index];
+  buzzerMelodyFrequencies = frequencies;
+  buzzerMelodyDurations = durations;
+  buzzerMelodyCount = noteCount;
+  buzzerMelodyIndex = 0;
+  buzzerMelodyActive = noteCount > 0;
+  buzzerTonePhase = false;
+  buzzerPhaseEndsAtMs = 0;
+  noTone(BUZZER_PIN);
+}
 
-    if (frequency == 0) {
-      delay(duration);
-      continue;
-    }
-
-    if (honorMute) {
-      beep(frequency, duration);
-    } else {
-      beepImmediate(frequency, duration);
-    }
+void serviceBuzzer(unsigned long now) {
+  if (!buzzerMelodyActive) {
+    return;
   }
+  if (static_cast<long>(now - buzzerPhaseEndsAtMs) < 0) {
+    return;
+  }
+
+  if (buzzerTonePhase) {
+    noTone(BUZZER_PIN);
+    buzzerTonePhase = false;
+    ++buzzerMelodyIndex;
+    buzzerPhaseEndsAtMs = now + 30;
+    return;
+  }
+
+  if (buzzerMelodyIndex >= buzzerMelodyCount) {
+    buzzerMelodyActive = false;
+    noTone(BUZZER_PIN);
+    return;
+  }
+
+  const uint16_t frequency = buzzerMelodyFrequencies[buzzerMelodyIndex];
+  const uint16_t duration = buzzerMelodyDurations[buzzerMelodyIndex];
+  if (frequency == 0 || duration == 0) {
+    noTone(BUZZER_PIN);
+    ++buzzerMelodyIndex;
+    buzzerPhaseEndsAtMs = now + duration;
+    return;
+  }
+
+  tone(BUZZER_PIN, frequency, duration);
+  buzzerTonePhase = true;
+  buzzerPhaseEndsAtMs = now + duration;
+}
+
+void beep(uint16_t frequency, uint16_t durationMs) {
+  static uint16_t singleFrequency[1];
+  static uint16_t singleDuration[1];
+  singleFrequency[0] = frequency;
+  singleDuration[0] = durationMs;
+  startMelody(singleFrequency, singleDuration, 1, true);
+}
+
+void playMelody(const uint16_t *frequencies, const uint16_t *durations, size_t noteCount, bool honorMute) {
+  startMelody(frequencies, durations, noteCount, honorMute);
 }
 
 void playBootMelody() {
-  constexpr uint16_t frequencies[] = {1960, 2470, 2940};
-  constexpr uint16_t durations[] = {90, 90, 140};
-  playMelody(frequencies, durations, 3, false);
+  playMelody(BOOT_MELODY_FREQUENCIES, BOOT_MELODY_DURATIONS, 3, false);
 }
 
 void playWifiConnectedMelody() {
-  constexpr uint16_t frequencies[] = {1760, 2200, 2620};
-  constexpr uint16_t durations[] = {90, 90, 130};
-  playMelody(frequencies, durations, 3, true);
+  playMelody(WIFI_CONNECTED_MELODY_FREQUENCIES, WIFI_CONNECTED_MELODY_DURATIONS, 3, true);
 }
 
 void playWifiDisconnectedMelody() {
-  constexpr uint16_t frequencies[] = {2620, 1960, 1470};
-  constexpr uint16_t durations[] = {100, 100, 140};
-  playMelody(frequencies, durations, 3, true);
+  playMelody(WIFI_DISCONNECTED_MELODY_FREQUENCIES, WIFI_DISCONNECTED_MELODY_DURATIONS, 3, true);
 }
 
 void playMqttConnectedMelody() {
-  constexpr uint16_t frequencies[] = {1560, 2080, 1560, 3120};
-  constexpr uint16_t durations[] = {70, 70, 70, 150};
-  playMelody(frequencies, durations, 4, true);
+  playMelody(MQTT_CONNECTED_MELODY_FREQUENCIES, MQTT_CONNECTED_MELODY_DURATIONS, 4, true);
 }
 
 void serviceBackgroundTasksDuringOta() {
@@ -624,13 +761,14 @@ bool runHttpUpdate(const String &url, int updateCommand, const String &phaseLabe
   BearSSL::WiFiClientSecure client;
   client.setInsecure();
   client.setTimeout(30000);
-  client.setBufferSizes(512, 512);
+  client.setBufferSizes(1024, 1024);
 
   HTTPClient https;
   https.setReuse(false);
   https.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
   https.setTimeout(30000);
   https.setUserAgent(githubUserAgent());
+  https.useHTTP10(true);
 
   otaCurrentPhase = phaseLabel;
   otaProgressCurrentBytes = 0;
@@ -658,12 +796,7 @@ bool runHttpUpdate(const String &url, int updateCommand, const String &phaseLabe
   }
 
   otaProgressTotalBytes = static_cast<size_t>(totalBytes);
-  WiFiClient *stream = https.getStreamPtr();
-  if (stream == nullptr) {
-    otaStatusMessage = phaseLabel + " update failed: no download stream.";
-    https.end();
-    return false;
-  }
+  WiFiClient &stream = https.getStream();
 
   if (!Update.begin(static_cast<size_t>(totalBytes), updateCommand)) {
     otaStatusMessage = phaseLabel + " update failed: " + Update.getErrorString();
@@ -673,7 +806,7 @@ bool runHttpUpdate(const String &url, int updateCommand, const String &phaseLabe
 
   uint8_t buffer[1024];
   while (https.connected() && (otaProgressCurrentBytes < otaProgressTotalBytes)) {
-    const size_t available = stream->available();
+    const size_t available = stream.available();
     if (available == 0) {
       serviceBackgroundTasksDuringOta();
       delay(1);
@@ -681,7 +814,7 @@ bool runHttpUpdate(const String &url, int updateCommand, const String &phaseLabe
     }
 
     const size_t toRead = available > sizeof(buffer) ? sizeof(buffer) : available;
-    const size_t bytesRead = stream->readBytes(buffer, toRead);
+    const size_t bytesRead = stream.readBytes(buffer, toRead);
     if (bytesRead == 0) {
       serviceBackgroundTasksDuringOta();
       continue;
@@ -955,7 +1088,7 @@ void sampleSensor() {
   uint32_t total = 0;
   for (uint8_t index = 0; index < 8; ++index) {
     total += analogRead(A0);
-    delay(2);
+    yield();
   }
 
   const uint16_t rawAdc = total / 8;
@@ -1123,36 +1256,69 @@ void sendFirmwareInfo() {
     return;
   }
 
-  JsonDocument tags;
-  String errorMessage;
-  if (!fetchGithubTags(tags, errorMessage)) {
-    response["error"] = errorMessage;
-    String payload;
-    serializeJson(response, payload);
-    server.send(200, "application/json", payload);
-    return;
-  }
-
   String latestVersion;
-  for (JsonObject tag : tags.as<JsonArray>()) {
-    const String tagName = String(static_cast<const char *>(tag["name"] | ""));
-    if (tagName.isEmpty()) {
-      continue;
+  JsonDocument releases;
+  String errorMessage;
+  if (fetchGithubReleases(releases, errorMessage)) {
+    for (JsonObjectConst release : releases.as<JsonArrayConst>()) {
+      const bool draft = release["draft"] | false;
+      const bool prerelease = release["prerelease"] | false;
+      if (draft || prerelease) {
+        continue;
+      }
+
+      const String tagName = String(static_cast<const char *>(release["tag_name"] | ""));
+      const String firmwareUrl = chooseReleaseAssetUrl(release["assets"], GITHUB_FIRMWARE_ASSET_NAME);
+      const String filesystemUrl = chooseReleaseAssetUrl(release["assets"], GITHUB_FILESYSTEM_ASSET_NAME);
+      if (tagName.isEmpty() || firmwareUrl.isEmpty()) {
+        continue;
+      }
+
+      if (latestVersion.isEmpty()) {
+        latestVersion = tagName;
+      }
+
+      JsonObject item = releasesOut.add<JsonObject>();
+      item["tag"] = tagName;
+      item["name"] = String(static_cast<const char *>(release["name"] | tagName.c_str()));
+      item["publishedAt"] = String(static_cast<const char *>(release["published_at"] | ""));
+      item["prerelease"] = prerelease;
+      item["hasFilesystem"] = !filesystemUrl.isEmpty();
+      item["isCurrent"] = tagName == FIRMWARE_VERSION;
+      item["isLatest"] = false;
+      item["isNew"] = false;
+    }
+  } else {
+    JsonDocument tags;
+    String tagsError;
+    if (!fetchGithubTags(tags, tagsError)) {
+      response["error"] = errorMessage.isEmpty() ? tagsError : errorMessage;
+      String payload;
+      serializeJson(response, payload);
+      server.send(200, "application/json", payload);
+      return;
     }
 
-    if (latestVersion.isEmpty()) {
-      latestVersion = tagName;
-    }
+    for (JsonObjectConst tag : tags.as<JsonArrayConst>()) {
+      const String tagName = String(static_cast<const char *>(tag["name"] | ""));
+      if (tagName.isEmpty()) {
+        continue;
+      }
 
-    JsonObject item = releasesOut.add<JsonObject>();
-    item["tag"] = tagName;
-    item["name"] = tagName;
-    item["publishedAt"] = "";
-    item["prerelease"] = false;
-    item["hasFilesystem"] = true;
-    item["isCurrent"] = tagName == FIRMWARE_VERSION;
-    item["isLatest"] = false;
-    item["isNew"] = false;
+      if (latestVersion.isEmpty()) {
+        latestVersion = tagName;
+      }
+
+      JsonObject item = releasesOut.add<JsonObject>();
+      item["tag"] = tagName;
+      item["name"] = tagName;
+      item["publishedAt"] = "";
+      item["prerelease"] = false;
+      item["hasFilesystem"] = true;
+      item["isCurrent"] = tagName == FIRMWARE_VERSION;
+      item["isLatest"] = false;
+      item["isNew"] = false;
+    }
   }
 
   response["latestVersion"] = latestVersion;
@@ -1411,6 +1577,7 @@ void loopApp() {
   server.handleClient();
 
   const unsigned long now = millis();
+  serviceBuzzer(now);
   const bool wifiConnected = WiFi.isConnected();
   const bool mqttConnected = mqttClient.connected();
   updateStatusLed(now);

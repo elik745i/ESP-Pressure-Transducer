@@ -1,0 +1,9 @@
+ESP Pressure Transducer v1.1.5
+
+ESP8266 4M1M LittleFS flash layout:
+- firmware.bin -> 0x000000
+- littlefs.bin -> 0x300000
+
+Recommended:
+- Flash `firmware.bin` for normal firmware updates
+- Flash `littlefs.bin` too only when you intentionally want to refresh the filesystem image
