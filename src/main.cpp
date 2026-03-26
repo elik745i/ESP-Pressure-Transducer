@@ -15,13 +15,14 @@
 namespace {
 
 constexpr char CONFIG_PATH[] = "/config.json";
-constexpr char FIRMWARE_VERSION[] = "v1.1.5";
+constexpr char FIRMWARE_VERSION[] = "v1.1.6";
 constexpr char GITHUB_OWNER[] = "elik745i";
 constexpr char GITHUB_REPO[] = "ESP-Pressure-Transducer";
 constexpr char GITHUB_RELEASES_API_URL[] = "https://api.github.com/repos/elik745i/ESP-Pressure-Transducer/releases?per_page=10";
 constexpr char GITHUB_TAGS_API_URL[] = "https://api.github.com/repos/elik745i/ESP-Pressure-Transducer/tags?per_page=10";
 constexpr char GITHUB_FIRMWARE_ASSET_NAME[] = "firmware.bin";
 constexpr char GITHUB_FILESYSTEM_ASSET_NAME[] = "littlefs.bin";
+constexpr char OTA_DIRECT_FIRMWARE_PATH[] = "firmware.bin";
 constexpr uint8_t BUZZER_PIN = D5;
 constexpr uint8_t STATUS_LED_PIN = LED_BUILTIN;
 constexpr uint16_t DNS_PORT = 53;
@@ -58,6 +59,7 @@ struct AppConfig {
   String deviceName;
   String apSsid;
   String apPassword;
+  String otaBaseUrl;
   String wifiSsid;
   String wifiPassword;
   String mqttHost;
@@ -121,6 +123,11 @@ String otaFirmwareUrl = "";
 String otaCurrentPhase = "";
 size_t otaProgressCurrentBytes = 0;
 size_t otaProgressTotalBytes = 0;
+bool localFirmwareUploadOk = false;
+bool localFirmwareUploadStarted = false;
+bool localFirmwareUploadHadData = false;
+String localFirmwareUploadError = "";
+String localFirmwareUploadFilename = "";
 const uint16_t *buzzerMelodyFrequencies = nullptr;
 const uint16_t *buzzerMelodyDurations = nullptr;
 size_t buzzerMelodyCount = 0;
@@ -245,6 +252,7 @@ void setDefaults() {
   config.deviceName = defaultDeviceName();
   config.apSsid = defaultApSsid();
   config.apPassword = "12345678";
+  config.otaBaseUrl = "";
   config.wifiSsid = "";
   config.wifiPassword = "";
   config.mqttHost = "";
@@ -274,6 +282,7 @@ bool saveConfig() {
   JsonDocument doc;
   doc["apSsid"] = config.apSsid;
   doc["apPassword"] = config.apPassword;
+  doc["otaBaseUrl"] = config.otaBaseUrl;
   doc["sensorMinVoltage"] = config.sensorMinVoltage;
   doc["sensorMaxVoltage"] = config.sensorMaxVoltage;
   doc["sensorMaxPressureKPa"] = config.sensorMaxPressureKPa;
@@ -323,6 +332,7 @@ bool loadConfig() {
 
   config.apSsid = doc["apSsid"] | config.apSsid;
   config.apPassword = doc["apPassword"] | config.apPassword;
+  config.otaBaseUrl = doc["otaBaseUrl"] | config.otaBaseUrl;
   config.sensorMinVoltage = doc["sensorMinVoltage"] | config.sensorMinVoltage;
   config.sensorMaxVoltage = doc["sensorMaxVoltage"] | config.sensorMaxVoltage;
   config.sensorMaxPressureKPa = doc["sensorMaxPressureKPa"] | config.sensorMaxPressureKPa;
@@ -475,9 +485,35 @@ String githubUserAgent() {
   return String("ESP-Pressure-Transducer/") + FIRMWARE_VERSION;
 }
 
+void otaDebug(const String &message) {
+  Serial.print(F("[OTA] "));
+  Serial.println(message);
+}
+
 String githubReleaseAssetUrl(const String &tagName, const char *assetName) {
   return String("https://github.com/") + GITHUB_OWNER + "/" + GITHUB_REPO +
          "/releases/download/" + tagName + "/" + assetName;
+}
+
+String normalizedOtaBaseUrl() {
+  String baseUrl = config.otaBaseUrl;
+  baseUrl.trim();
+  while (baseUrl.endsWith("/")) {
+    baseUrl.remove(baseUrl.length() - 1);
+  }
+  return baseUrl;
+}
+
+bool otaBaseUrlConfigured() {
+  return !normalizedOtaBaseUrl().isEmpty();
+}
+
+String otaDirectDownloadUrl(const String &tagName, const char *assetName) {
+  const String baseUrl = normalizedOtaBaseUrl();
+  if (baseUrl.isEmpty()) {
+    return "";
+  }
+  return baseUrl + "/" + tagName + "/" + assetName;
 }
 
 String chooseReleaseAssetUrl(const JsonVariantConst &assets, const char *assetName) {
@@ -651,6 +687,14 @@ bool resolveReleaseAssets(const String &tagName, String &firmwareUrl, String &fi
   return false;
 }
 
+String resolveFirmwareDownloadUrl(const String &tagName, const String &githubAssetUrl) {
+  const String directUrl = otaDirectDownloadUrl(tagName, OTA_DIRECT_FIRMWARE_PATH);
+  if (!directUrl.isEmpty()) {
+    return directUrl;
+  }
+  return githubAssetUrl;
+}
+
 void fillDiscoveryDevice(JsonObject device) {
   JsonArray ids = device["ids"].to<JsonArray>();
   ids.add(uniqueIdBase());
@@ -749,12 +793,28 @@ void playMqttConnectedMelody() {
   playMelody(MQTT_CONNECTED_MELODY_FREQUENCIES, MQTT_CONNECTED_MELODY_DURATIONS, 4, true);
 }
 
-void serviceBackgroundTasksDuringOta() {
-  if (accessPointEnabled) {
-    dnsServer.processNextRequest();
-  }
-  server.handleClient();
-  yield();
+bool hasBinExtension(const String &filename) {
+  String lowercase = filename;
+  lowercase.toLowerCase();
+  return lowercase.endsWith(".bin");
+}
+
+void resetLocalFirmwareUploadState() {
+  localFirmwareUploadOk = false;
+  localFirmwareUploadStarted = false;
+  localFirmwareUploadHadData = false;
+  localFirmwareUploadError = "";
+  localFirmwareUploadFilename = "";
+}
+
+void failLocalFirmwareUpload(const String &message) {
+  localFirmwareUploadError = message;
+  otaUpdateRunning = false;
+  otaProgressPercent = 0;
+  otaProgressCurrentBytes = 0;
+  otaProgressTotalBytes = 0;
+  otaCurrentPhase = "";
+  otaStatusMessage = message;
 }
 
 bool runHttpUpdate(const String &url, int updateCommand, const String &phaseLabel) {
@@ -763,95 +823,150 @@ bool runHttpUpdate(const String &url, int updateCommand, const String &phaseLabe
   client.setTimeout(30000);
   client.setBufferSizes(1024, 1024);
 
-  HTTPClient https;
-  https.setReuse(false);
-  https.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
-  https.setTimeout(30000);
-  https.setUserAgent(githubUserAgent());
-  https.useHTTP10(true);
-
   otaCurrentPhase = phaseLabel;
   otaProgressCurrentBytes = 0;
   otaProgressTotalBytes = 0;
   otaProgressPercent = 0;
   otaStatusMessage = phaseLabel + " update started...";
+  otaDebug("Starting " + phaseLabel + " OTA from: " + url);
+  otaDebug("Wi-Fi RSSI: " + String(WiFi.RSSI()) + " dBm");
+  otaDebug("Redirect mode: HTTPC_FORCE_FOLLOW_REDIRECTS");
 
-  if (!https.begin(client, url)) {
+  HTTPClient http;
+  const char *headerKeys[] = {"Content-Type", "Location"};
+  http.setTimeout(12000);
+  http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
+  http.setUserAgent(githubUserAgent());
+  http.useHTTP10(true);
+  http.collectHeaders(headerKeys, 2);
+  if (!http.begin(client, url)) {
+    otaDebug("HTTP begin failed.");
     otaStatusMessage = phaseLabel + " update failed: could not open URL.";
     return false;
   }
 
-  const int statusCode = https.GET();
-  if (statusCode != HTTP_CODE_OK) {
-    otaStatusMessage = phaseLabel + " update failed: HTTP " + String(statusCode);
-    https.end();
+  http.addHeader("Accept", "application/octet-stream");
+  const int code = http.GET();
+  otaDebug("HTTP GET code: " + String(code));
+  otaDebug("Requested URL: " + url);
+  otaDebug("Redirect location header: " + http.header("Location"));
+  if (code < 200 || code >= 300) {
+    otaDebug("HTTP GET failed, response text: " + http.getString());
+    otaStatusMessage = phaseLabel + " update failed: HTTP " + String(code);
+    http.end();
     return false;
   }
 
-  const int totalBytes = https.getSize();
-  if (totalBytes <= 0) {
+  const int totalLen = http.getSize();
+  otaDebug("Content-Length: " + String(totalLen));
+  otaDebug("Content-Type: " + http.header("Content-Type"));
+  if (totalLen <= 0) {
     otaStatusMessage = phaseLabel + " update failed: unknown content length.";
-    https.end();
+    http.end();
     return false;
   }
 
-  otaProgressTotalBytes = static_cast<size_t>(totalBytes);
-  WiFiClient &stream = https.getStream();
+  WiFiClient &stream = http.getStream();
+  stream.setTimeout(3000);
+  otaDebug("Stream object acquired.");
+  otaDebug("HTTP connected immediately after headers: " + String(http.connected() ? "yes" : "no"));
 
-  if (!Update.begin(static_cast<size_t>(totalBytes), updateCommand)) {
+  uint8_t headerProbe[4] = {0};
+  const size_t peeked = stream.peekBytes(headerProbe, sizeof(headerProbe));
+  if (peeked > 0) {
+    char headerHex[16];
+    snprintf(headerHex, sizeof(headerHex), "%02X %02X %02X %02X",
+             headerProbe[0],
+             peeked > 1 ? headerProbe[1] : 0,
+             peeked > 2 ? headerProbe[2] : 0,
+             peeked > 3 ? headerProbe[3] : 0);
+    otaDebug("First bytes: " + String(headerHex));
+  } else {
+    otaDebug("Could not peek first bytes from OTA stream.");
+  }
+
+  if (!Update.begin(static_cast<size_t>(totalLen), updateCommand)) {
+    otaDebug("Update.begin failed: " + Update.getErrorString());
     otaStatusMessage = phaseLabel + " update failed: " + Update.getErrorString();
-    https.end();
+    http.end();
     return false;
   }
 
   uint8_t buffer[1024];
-  while (https.connected() && (otaProgressCurrentBytes < otaProgressTotalBytes)) {
-    const size_t available = stream.available();
-    if (available == 0) {
-      serviceBackgroundTasksDuringOta();
+  int remaining = totalLen;
+  uint8_t emptyReadCount = 0;
+  bool sawBodyData = false;
+  while (remaining > 0) {
+    const size_t available = static_cast<size_t>(stream.available());
+    const size_t toRead = available > 0
+                              ? (available > sizeof(buffer) ? sizeof(buffer) : available)
+                              : (remaining > static_cast<int>(sizeof(buffer)) ? sizeof(buffer) : static_cast<size_t>(remaining));
+    const int bytesRead = stream.readBytes(buffer, toRead);
+    if (bytesRead <= 0) {
+      ++emptyReadCount;
+      otaDebug("Stream read returned 0, connected=" + String(http.connected() ? "yes" : "no") +
+               ", available=" + String(stream.available()) +
+               ", remaining=" + String(remaining) +
+               ", empty_reads=" + String(emptyReadCount));
+      if (emptyReadCount >= 5) {
+        otaStatusMessage = sawBodyData
+                               ? phaseLabel + " update failed: stream stalled before completion."
+                               : phaseLabel + " update failed: empty OTA body.";
+        otaDebug("Rejecting OTA because the body stream did not provide data.");
+        http.end();
+        return false;
+      }
       delay(1);
       continue;
     }
 
-    const size_t toRead = available > sizeof(buffer) ? sizeof(buffer) : available;
-    const size_t bytesRead = stream.readBytes(buffer, toRead);
-    if (bytesRead == 0) {
-      serviceBackgroundTasksDuringOta();
-      continue;
-    }
+    emptyReadCount = 0;
+    sawBodyData = true;
+    otaDebug("Read chunk: " + String(bytesRead) + " bytes, connected=" +
+             String(http.connected() ? "yes" : "no") +
+             ", available=" + String(stream.available()) +
+             ", remaining_before=" + String(remaining));
 
-    const size_t written = Update.write(buffer, bytesRead);
-    if (written != bytesRead) {
-      Update.end();
+    if (Update.write(buffer, static_cast<size_t>(bytesRead)) != static_cast<size_t>(bytesRead)) {
+      otaDebug("Update.write failed at " + String(otaProgressCurrentBytes) + " bytes: " + Update.getErrorString());
       otaStatusMessage = phaseLabel + " update failed: " + Update.getErrorString();
-      https.end();
+      http.end();
       return false;
     }
 
-    otaProgressCurrentBytes += written;
-    otaProgressPercent = otaProgressTotalBytes > 0
-                             ? static_cast<uint8_t>((otaProgressCurrentBytes * 100U) / otaProgressTotalBytes)
-                             : 0;
-    otaStatusMessage = phaseLabel + " update " + String(otaProgressPercent) + "%";
-    serviceBackgroundTasksDuringOta();
+    otaProgressCurrentBytes += static_cast<size_t>(bytesRead);
+    if (remaining > 0) {
+      remaining -= bytesRead;
+    }
+    if (totalLen > 0) {
+      otaProgressTotalBytes = static_cast<size_t>(totalLen);
+      otaProgressPercent = static_cast<uint8_t>(
+          min<size_t>(100U, (otaProgressCurrentBytes * 100U) / static_cast<size_t>(totalLen)));
+      otaStatusMessage = phaseLabel + " update " + String(otaProgressPercent) + "%";
+    }
+    delay(0);
   }
 
-  if (!Update.end()) {
-    otaStatusMessage = phaseLabel + " update failed: " + Update.getErrorString();
-    https.end();
+  http.end();
+  otaDebug("HTTP download finished, received bytes: " + String(otaProgressCurrentBytes));
+  if (!sawBodyData) {
+    otaStatusMessage = phaseLabel + " update failed: empty OTA body.";
+    otaDebug("Rejecting OTA because zero body bytes were read.");
     return false;
   }
 
-  if (!Update.isFinished()) {
-    otaStatusMessage = phaseLabel + " update failed: incomplete write.";
-    https.end();
+  otaProgressPercent = 100;
+  otaCurrentPhase = phaseLabel;
+  otaStatusMessage = phaseLabel + " finalizing...";
+  if (!Update.end(true)) {
+    otaDebug("Update.end(true) failed: " + Update.getErrorString());
+    otaStatusMessage = phaseLabel + " update failed: " + Update.getErrorString();
     return false;
   }
 
   otaProgressCurrentBytes = otaProgressTotalBytes;
-  otaProgressPercent = 100;
+  otaDebug(phaseLabel + " OTA completed successfully.");
   otaStatusMessage = phaseLabel + " update completed.";
-  https.end();
   return true;
 }
 
@@ -1160,6 +1275,7 @@ void sendJsonConfig() {
   doc["deviceName"] = config.deviceName;
   doc["apSsid"] = config.apSsid;
   doc["apPassword"] = config.apPassword;
+  doc["otaBaseUrl"] = config.otaBaseUrl;
   doc["wifiSsid"] = config.wifiSsid;
   doc["wifiPassword"] = config.wifiPassword;
   doc["mqttHost"] = config.mqttHost;
@@ -1240,6 +1356,7 @@ void sendFirmwareInfo() {
   const bool includeReleases = server.hasArg("refresh") && server.arg("refresh") == "1";
   JsonDocument response;
   response["currentVersion"] = FIRMWARE_VERSION;
+  response["otaBaseUrlConfigured"] = otaBaseUrlConfigured();
   response["updateStatus"] = otaStatusMessage;
   response["updateBusy"] = otaUpdateRunning || otaUpdateRequested;
   response["updateProgress"] = otaProgressPercent;
@@ -1284,6 +1401,7 @@ void sendFirmwareInfo() {
       item["publishedAt"] = String(static_cast<const char *>(release["published_at"] | ""));
       item["prerelease"] = prerelease;
       item["hasFilesystem"] = !filesystemUrl.isEmpty();
+      item["downloadUrl"] = resolveFirmwareDownloadUrl(tagName, firmwareUrl);
       item["isCurrent"] = tagName == FIRMWARE_VERSION;
       item["isLatest"] = false;
       item["isNew"] = false;
@@ -1315,6 +1433,7 @@ void sendFirmwareInfo() {
       item["publishedAt"] = "";
       item["prerelease"] = false;
       item["hasFilesystem"] = true;
+      item["downloadUrl"] = resolveFirmwareDownloadUrl(tagName, githubReleaseAssetUrl(tagName, GITHUB_FIRMWARE_ASSET_NAME));
       item["isCurrent"] = tagName == FIRMWARE_VERSION;
       item["isLatest"] = false;
       item["isNew"] = false;
@@ -1359,6 +1478,7 @@ void handleFirmwareUpdatePost() {
   String filesystemUrl;
   String errorMessage;
   if (!resolveReleaseAssets(requestedVersion, firmwareUrl, filesystemUrl, errorMessage)) {
+    otaDebug("Failed to resolve assets for " + requestedVersion + ": " + errorMessage);
     JsonDocument response;
     response["error"] = errorMessage;
     String payload;
@@ -1368,14 +1488,16 @@ void handleFirmwareUpdatePost() {
   }
 
   otaUpdateVersion = requestedVersion;
-  otaFirmwareUrl = firmwareUrl;
+  otaFirmwareUrl = resolveFirmwareDownloadUrl(requestedVersion, firmwareUrl);
+  otaDebug("Resolved GitHub firmware asset for " + requestedVersion + ": " + firmwareUrl);
+  otaDebug("Selected OTA download URL for " + requestedVersion + ": " + otaFirmwareUrl);
   otaUpdateRequested = true;
   otaUpdateRunning = false;
   otaProgressPercent = 0;
   otaCurrentPhase = "";
-  otaStatusMessage = filesystemUrl.isEmpty()
-                         ? "Update queued for " + requestedVersion + "."
-                         : "Update queued for " + requestedVersion + " (firmware only, settings preserved).";
+  otaStatusMessage = otaBaseUrlConfigured()
+                         ? "Update queued for " + requestedVersion + " from OTA host."
+                         : "Update queued for " + requestedVersion + " from GitHub.";
 
   JsonDocument response;
   response["ok"] = true;
@@ -1383,6 +1505,129 @@ void handleFirmwareUpdatePost() {
   String payload;
   serializeJson(response, payload);
   server.send(200, "application/json", payload);
+}
+
+void handleFirmwareUploadPost() {
+  JsonDocument response;
+  if (!localFirmwareUploadError.isEmpty()) {
+    response["error"] = localFirmwareUploadError;
+    String payload;
+    serializeJson(response, payload);
+    server.send(400, "application/json", payload);
+    return;
+  }
+
+  if (!localFirmwareUploadOk) {
+    response["error"] = "Firmware upload did not complete.";
+    String payload;
+    serializeJson(response, payload);
+    server.send(400, "application/json", payload);
+    return;
+  }
+
+  response["ok"] = true;
+  response["message"] = "Local firmware uploaded successfully. Restarting...";
+  String payload;
+  serializeJson(response, payload);
+  server.send(200, "application/json", payload);
+}
+
+void handleFirmwareUploadData() {
+  HTTPUpload &upload = server.upload();
+
+  if (upload.status == UPLOAD_FILE_START) {
+    resetLocalFirmwareUploadState();
+    if (otaUpdateRunning || otaUpdateRequested) {
+      localFirmwareUploadError = "Another update is already in progress.";
+      return;
+    }
+
+    localFirmwareUploadFilename = upload.filename;
+    if (!hasBinExtension(upload.filename)) {
+      localFirmwareUploadError = "Select a .bin firmware image.";
+      return;
+    }
+
+    localFirmwareUploadStarted = true;
+    otaUpdateRunning = true;
+    otaUpdateRequested = false;
+    otaUpdateVersion = "local";
+    otaCurrentPhase = "Upload";
+    otaProgressPercent = 0;
+    otaProgressCurrentBytes = 0;
+    otaProgressTotalBytes = upload.totalSize;
+    otaStatusMessage = "Uploading local firmware...";
+
+    const uint32_t maxSketchSpace = (ESP.getFreeSketchSpace() - 0x1000U) & 0xFFFFF000U;
+    if (!Update.begin(maxSketchSpace, U_FLASH)) {
+      failLocalFirmwareUpload(String("Local firmware update failed: ") + Update.getErrorString());
+    }
+    return;
+  }
+
+  if (upload.status == UPLOAD_FILE_WRITE) {
+    if (!localFirmwareUploadError.isEmpty() || !localFirmwareUploadStarted) {
+      return;
+    }
+
+    if (!localFirmwareUploadHadData) {
+      localFirmwareUploadHadData = upload.currentSize > 0;
+      if (!localFirmwareUploadHadData || upload.buf[0] != 0xE9) {
+        failLocalFirmwareUpload("Uploaded file is not a valid ESP8266 firmware image.");
+        return;
+      }
+    }
+
+    if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
+      failLocalFirmwareUpload(String("Local firmware update failed: ") + Update.getErrorString());
+      return;
+    }
+
+    otaProgressCurrentBytes += upload.currentSize;
+    if (otaProgressTotalBytes > 0) {
+      otaProgressPercent = static_cast<uint8_t>((otaProgressCurrentBytes * 100U) / otaProgressTotalBytes);
+    }
+    otaStatusMessage = "Uploading local firmware... " + String(otaProgressPercent) + "%";
+    return;
+  }
+
+  if (upload.status == UPLOAD_FILE_END) {
+    if (!localFirmwareUploadError.isEmpty() || !localFirmwareUploadStarted) {
+      otaUpdateRunning = false;
+      return;
+    }
+
+    if (!localFirmwareUploadHadData) {
+      failLocalFirmwareUpload("Uploaded firmware did not contain data.");
+      return;
+    }
+
+    if (!Update.end(true)) {
+      const String updateError = Update.getErrorString();
+      failLocalFirmwareUpload(updateError == "No Error"
+                                  ? "Local firmware update failed: uploaded image could not be finalized."
+                                  : String("Local firmware update failed: ") + updateError);
+      return;
+    }
+
+    if (!Update.isFinished()) {
+      failLocalFirmwareUpload("Local firmware update failed: incomplete write.");
+      return;
+    }
+
+    localFirmwareUploadOk = true;
+    otaUpdateRunning = false;
+    otaProgressCurrentBytes = otaProgressTotalBytes;
+    otaProgressPercent = 100;
+    otaCurrentPhase = "";
+    otaStatusMessage = "Local firmware uploaded. Restarting...";
+    scheduleRestart(1500);
+    return;
+  }
+
+  if (upload.status == UPLOAD_FILE_ABORTED) {
+    failLocalFirmwareUpload("Local firmware upload was canceled.");
+  }
 }
 
 bool updateConfigFromRequest() {
@@ -1396,6 +1641,7 @@ bool updateConfigFromRequest() {
   config.deviceName = String(static_cast<const char *>(doc["deviceName"] | config.deviceName.c_str()));
   config.apSsid = String(static_cast<const char *>(doc["apSsid"] | config.apSsid.c_str()));
   config.apPassword = String(static_cast<const char *>(doc["apPassword"] | config.apPassword.c_str()));
+  config.otaBaseUrl = String(static_cast<const char *>(doc["otaBaseUrl"] | config.otaBaseUrl.c_str()));
   config.wifiSsid = String(static_cast<const char *>(doc["wifiSsid"] | config.wifiSsid.c_str()));
   config.wifiPassword = String(static_cast<const char *>(doc["wifiPassword"] | config.wifiPassword.c_str()));
   config.mqttHost = String(static_cast<const char *>(doc["mqttHost"] | config.mqttHost.c_str()));
@@ -1422,6 +1668,17 @@ bool updateConfigFromRequest() {
 
   if (config.apPassword.length() < 8) {
     server.send(400, "application/json", "{\"error\":\"AP password must be at least 8 characters\"}");
+    return false;
+  }
+
+  config.otaBaseUrl.trim();
+  while (config.otaBaseUrl.endsWith("/")) {
+    config.otaBaseUrl.remove(config.otaBaseUrl.length() - 1);
+  }
+  if (!config.otaBaseUrl.isEmpty() &&
+      !config.otaBaseUrl.startsWith("http://") &&
+      !config.otaBaseUrl.startsWith("https://")) {
+    server.send(400, "application/json", "{\"error\":\"OTA Base URL must start with http:// or https://\"}");
     return false;
   }
 
@@ -1527,6 +1784,7 @@ void configureWebServer() {
   server.on("/api/wifi/scan", HTTP_GET, sendWifiScanResults);
   server.on("/api/firmware", HTTP_GET, sendFirmwareInfo);
   server.on("/api/firmware/update", HTTP_POST, handleFirmwareUpdatePost);
+  server.on("/api/firmware/upload", HTTP_POST, handleFirmwareUploadPost, handleFirmwareUploadData);
   server.on("/api/restart", HTTP_POST, handleRestartPost);
   server.onNotFound(handleNotFound);
   server.begin();

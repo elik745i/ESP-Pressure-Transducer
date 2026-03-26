@@ -1,6 +1,6 @@
-﻿#pragma once
+#pragma once
 
-namespace {
+#include <pgmspace.h>
 
 const char INDEX_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
 <html lang="en">
@@ -770,8 +770,16 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
           <div class="inline-actions">
             <button id="refreshFirmwareBtn" type="button" class="secondary">Check Releases</button>
             <button id="updateFirmwareBtn" type="button">Update Selected</button>
+            <button id="uploadFirmwareBtn" type="button" class="secondary">Upload Local Firmware</button>
             <span id="firmwareSelectionLabel" class="scan-status">No firmware selected</span>
+            <span id="localFirmwareLabel" class="scan-status"></span>
           </div>
+          <div class="row" style="margin-top: 12px;">
+            <label>OTA Base URL
+              <input id="otaBaseUrl" autocomplete="off" placeholder="https://example.com/esp-pressure-transducer">
+            </label>
+          </div>
+          <input id="localFirmwareFile" type="file" accept=".bin,application/octet-stream" hidden>
           <div class="progress-wrap">
             <div class="progress-bar" aria-label="OTA progress">
               <div id="firmwareProgressFill" class="progress-fill"></div>
@@ -779,7 +787,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
             <div id="firmwareProgressLabel" class="progress-label">No update in progress</div>
           </div>
           <div id="firmwareList" class="firmware-list"></div>
-          <p class="note">OTA updates download the selected firmware release from GitHub and preserve saved settings. Manual flash-tool installs can still use both firmware.bin and littlefs.bin when needed.</p>
+          <p class="note">Version discovery comes from GitHub. If OTA Base URL is set, the ESP8266 downloads <code>firmware.bin</code> from <code>&lt;base&gt;/&lt;version&gt;/firmware.bin</code> for a more reliable direct update path. Local upload still flashes <code>firmware.bin</code> only.</p>
         </div>
 
         <div class="actions">
@@ -795,7 +803,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
     const fields = [
       "deviceName", "apSsid", "apPassword", "wifiSsid", "wifiPassword",
       "mqttHost", "mqttPort", "mqttUser", "mqttPassword", "mqttBaseTopic",
-      "mqttDiscoveryPrefix", "sensorMinVoltage",
+      "mqttDiscoveryPrefix", "otaBaseUrl", "sensorMinVoltage",
       "sensorMaxVoltage", "sensorMaxPressureKPa", "buzzerAlarmThresholdKPa",
       "sensorFilterPreset",
       "publishIntervalSeconds", "oledContrast", "oledPressureUnit",
@@ -808,6 +816,8 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
     const wifiNetworkList = document.getElementById("wifiNetworkList");
     const passwordToggles = Array.from(document.querySelectorAll(".password-toggle"));
     const firmwareList = document.getElementById("firmwareList");
+    const localFirmwareFileInput = document.getElementById("localFirmwareFile");
+    const TAB_STORAGE_KEY = "esp_pressure_monitor_active_tab";
     let firmwareBusy = false;
     let cachedFirmwareReleases = [];
     let cachedFirmwareLatestVersion = "";
@@ -816,16 +826,23 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
     let firmwareReleasesLoading = false;
 
     function activateTab(tabName) {
+      const hasTab = tabButtons.some((button) => button.dataset.tab === tabName);
+      const resolvedTab = hasTab ? tabName : "device";
       tabButtons.forEach((button) => {
-        const isActive = button.dataset.tab === tabName;
+        const isActive = button.dataset.tab === resolvedTab;
         button.setAttribute("aria-selected", isActive ? "true" : "false");
       });
 
       tabPanels.forEach((panel) => {
-        panel.classList.toggle("active", panel.id === `tab-${tabName}`);
+        panel.classList.toggle("active", panel.id === `tab-${resolvedTab}`);
       });
 
-      if (tabName === "firmware") {
+      try {
+        localStorage.setItem(TAB_STORAGE_KEY, resolvedTab);
+      } catch (_) {
+      }
+
+      if (resolvedTab === "firmware") {
         refreshFirmwareInfo(!firmwareReleasesLoaded).catch((error) => setMessage(error.message, true));
       }
     }
@@ -902,6 +919,11 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
       document.getElementById("firmwareSelectionLabel").textContent = selected ? `Selected: ${selected}` : "No firmware selected";
     }
 
+    function updateLocalFirmwareLabel() {
+      const file = localFirmwareFileInput.files && localFirmwareFileInput.files[0];
+      document.getElementById("localFirmwareLabel").textContent = file ? `Local: ${file.name}` : "";
+    }
+
     function showFirmwareListStatus(text, isError = false) {
       firmwareList.innerHTML = "";
       const note = document.createElement("div");
@@ -917,7 +939,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
       firmwareList.innerHTML = "";
 
       if (!releases.length) {
-        showFirmwareListStatus("No firmware releases with firmware.bin were found on GitHub.");
+        showFirmwareListStatus("No firmware releases are available right now.");
         updateFirmwareSelectionLabel();
         return;
       }
@@ -986,11 +1008,10 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
     function updateFirmwarePanel(info) {
       const currentVersion = info.currentVersion || "-";
       const latestVersion = info.latestVersion || "No release";
+      firmwareReleasesLoading = false;
       document.getElementById("currentFirmwareVersion").textContent = currentVersion;
       document.getElementById("latestFirmwareVersion").textContent = latestVersion;
-      document.getElementById("firmwareStatusText").textContent = firmwareReleasesLoading && !info.updateBusy
-        ? "Checking releases..."
-        : (info.updateStatus || "Idle");
+      document.getElementById("firmwareStatusText").textContent = info.updateStatus || "Idle";
       const progress = Number(info.updateProgress || 0);
       const phase = info.updatePhase || "";
       const bytes = Number(info.updateBytes || 0);
@@ -1003,7 +1024,6 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
         document.getElementById("firmwareProgressLabel").textContent = "No update in progress";
       }
       firmwareBusy = Boolean(info.updateBusy);
-      firmwareReleasesLoading = false;
       if (Array.isArray(info.releases) && info.releases.length) {
         cachedFirmwareReleases = info.releases;
         cachedFirmwareLatestVersion = info.latestVersion || "";
@@ -1080,10 +1100,14 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
       if (forceRefresh) {
         firmwareReleasesLoading = true;
         document.getElementById("firmwareStatusText").textContent = "Checking releases...";
-        showFirmwareListStatus("Checking GitHub releases...");
+        showFirmwareListStatus("Checking available firmware releases...");
       }
-      const info = await fetchJson(forceRefresh ? "/api/firmware?refresh=1" : "/api/firmware");
-      updateFirmwarePanel(info);
+      try {
+        const info = await fetchJson(forceRefresh ? "/api/firmware?refresh=1" : "/api/firmware");
+        updateFirmwarePanel(info);
+      } finally {
+        firmwareReleasesLoading = false;
+      }
     }
 
     async function scanWifiNetworks() {
@@ -1150,6 +1174,80 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
       }
     }
 
+    async function uploadLocalFirmware() {
+      const file = localFirmwareFileInput.files && localFirmwareFileInput.files[0];
+      if (!file) {
+        setMessage("Select a local firmware .bin file first.", true);
+        return;
+      }
+      if (!/\.bin$/i.test(file.name)) {
+        setMessage("Select a .bin firmware image.", true);
+        return;
+      }
+      if (file.size <= 0) {
+        setMessage("Selected firmware file is empty.", true);
+        return;
+      }
+
+      setMessage(`Uploading ${file.name}...`);
+      firmwareBusy = true;
+      document.getElementById("firmwareStatusText").textContent = "Uploading local firmware...";
+      document.getElementById("firmwareProgressFill").style.width = "0%";
+      document.getElementById("firmwareProgressLabel").textContent = "Uploading local firmware... 0%";
+
+      const formData = new FormData();
+      formData.append("firmware", file, file.name);
+
+      await new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open("POST", "/api/firmware/upload");
+
+        xhr.upload.addEventListener("progress", (event) => {
+          if (!event.lengthComputable) {
+            return;
+          }
+          const percent = Math.max(0, Math.min(100, Math.round((event.loaded * 100) / event.total)));
+          document.getElementById("firmwareStatusText").textContent = "Uploading local firmware...";
+          document.getElementById("firmwareProgressFill").style.width = `${percent}%`;
+          document.getElementById("firmwareProgressLabel").textContent = `Uploading local firmware... ${percent}% (${event.loaded}/${event.total} bytes)`;
+        });
+
+        xhr.addEventListener("load", async () => {
+          firmwareBusy = false;
+          let payload = {};
+          try {
+            payload = JSON.parse(xhr.responseText || "{}");
+          } catch (_) {
+          }
+
+          if (xhr.status >= 200 && xhr.status < 300) {
+            setMessage(payload.message || "Local firmware uploaded.");
+            try {
+              await refreshFirmwareInfo(false);
+            } catch (_) {
+            }
+            resolve();
+            return;
+          }
+
+          reject(new Error(payload.error || xhr.statusText || "Local firmware upload failed."));
+        });
+
+        xhr.addEventListener("error", () => {
+          firmwareBusy = false;
+          reject(new Error("Local firmware upload failed."));
+        });
+
+        xhr.send(formData);
+      }).catch((error) => {
+        setMessage(error.message, true);
+        throw error;
+      }).finally(() => {
+        localFirmwareFileInput.value = "";
+        updateLocalFirmwareLabel();
+      });
+    }
+
     document.getElementById("saveBtn").addEventListener("click", saveConfiguration);
     document.getElementById("restartBtn").addEventListener("click", restartDevice);
     document.getElementById("scanWifiBtn").addEventListener("click", scanWifiNetworks);
@@ -1158,6 +1256,16 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
       refreshFirmwareInfo(true).catch((error) => setMessage(error.message, true));
     });
     document.getElementById("updateFirmwareBtn").addEventListener("click", updateFirmware);
+    document.getElementById("uploadFirmwareBtn").addEventListener("click", () => {
+      localFirmwareFileInput.value = "";
+      localFirmwareFileInput.click();
+    });
+    localFirmwareFileInput.addEventListener("change", () => {
+      updateLocalFirmwareLabel();
+      if (localFirmwareFileInput.files && localFirmwareFileInput.files[0]) {
+        uploadLocalFirmware().catch(() => {});
+      }
+    });
     wifiNetworkList.addEventListener("change", () => {
       if (wifiNetworkList.value) {
         document.getElementById("wifiSsid").value = wifiNetworkList.value;
@@ -1173,6 +1281,15 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
       });
     });
 
+    const initialTab = (() => {
+      try {
+        return localStorage.getItem(TAB_STORAGE_KEY) || "device";
+      } catch (_) {
+        return "device";
+      }
+    })();
+    activateTab(initialTab);
+
     refreshConfig().catch((error) => setMessage(error.message, true));
     refreshStatus().catch((error) => setMessage(error.message, true));
     setInterval(() => refreshStatus().catch(() => {}), 3000);
@@ -1185,5 +1302,3 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
 </body>
 </html>
 )rawliteral";
-
-}  // namespace

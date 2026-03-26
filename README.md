@@ -111,6 +111,32 @@ Set:
 
 After saving, the device restarts automatically.
 
+## Firmware Updates
+
+The Firmware tab supports two update methods:
+
+- GitHub release discovery for available versions
+- local `firmware.bin` upload through the web page
+
+For ESP8266 reliability, the recommended OTA setup is:
+
+- use GitHub for version discovery and release history
+- host the actual `firmware.bin` on a simple direct static URL
+- set `OTA Base URL` in the Firmware tab to:
+  `https://your-host/esp-pressure-transducer`
+
+Then the device downloads firmware from:
+
+- `https://your-host/esp-pressure-transducer/<version>/firmware.bin`
+
+If `OTA Base URL` is left empty, the firmware falls back to the GitHub release asset URL.
+
+The local upload button is for:
+
+- `firmware.bin`
+
+Do not use `littlefs.bin` with the local upload button. `littlefs.bin` is only for manual flash-tool installs when you intentionally want to refresh the filesystem image.
+
 ## MQTT Topics
 
 Default base topic:
@@ -157,7 +183,9 @@ The repository already includes a GitHub Actions workflow that builds the Platfo
 
 ## Notes
 
-- Wi-Fi and MQTT settings are stored in LittleFS at `/config.json`.
+- Wi-Fi, MQTT, and device identity settings are stored in persistent EEPROM-backed storage so they survive filesystem refreshes.
+- AP, calibration, OLED, and other non-critical settings are stored in LittleFS at `/config.json`.
 - The web UI is compiled into firmware and can also be stored separately in LittleFS as [data/index.html](data/index.html).
+- The Firmware tab can remember the last open tab in the browser and reopen it after refresh.
 - The OLED shows live pressure, Wi-Fi state, and MQTT state.
 - The built-in LED uses different blink patterns for boot, AP-only mode, Wi-Fi connection attempts, Wi-Fi connected, MQTT connected, and restart pending.
