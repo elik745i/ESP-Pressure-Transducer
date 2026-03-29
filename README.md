@@ -7,7 +7,9 @@ PlatformIO project for a Wemos D1 mini (ESP8266) pressure monitor with:
 - Wi-Fi station mode plus fallback configuration access point
 - captive portal behavior for easier AP setup on phones and laptops
 - MQTT publishing for Home Assistant
-- buzzer alarm for high pressure
+- buzzer alarm window with configurable Min and Max limits
+- Home Assistant MQTT discovery controls for Min / Max alarm settings in bar
+- Home Assistant device metadata with a direct LAN configuration page link
 
 ## Hardware
 
@@ -107,7 +109,7 @@ Set:
 - MQTT broker host, port, username, password
 - MQTT base topic
 - Home Assistant discovery prefix
-- sensor voltage calibration, full-scale pressure, and buzzer threshold
+- sensor voltage calibration, full-scale pressure, and buzzer alarm min/max window
 
 After saving, the device restarts automatically.
 
@@ -163,6 +165,13 @@ The state payload includes:
 If Home Assistant discovery is enabled, the firmware also publishes discovery topics under:
 
 - `homeassistant/sensor/.../config`
+- `homeassistant/number/.../config`
+
+Home Assistant discovery includes:
+
+- pressure sensor exposed in `bar`
+- `Min` and `Max` number controls for the buzzer alarm window
+- a device `configuration_url` that points to the device's LAN page when Wi-Fi is connected
 
 ## GitHub Setup
 

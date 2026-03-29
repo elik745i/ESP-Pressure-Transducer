@@ -15,7 +15,7 @@
 namespace {
 
 constexpr char CONFIG_PATH[] = "/config.json";
-constexpr char FIRMWARE_VERSION[] = "v1.1.6";
+constexpr char FIRMWARE_VERSION[] = "v1.1.7";
 constexpr char GITHUB_OWNER[] = "elik745i";
 constexpr char GITHUB_REPO[] = "ESP-Pressure-Transducer";
 constexpr char GITHUB_RELEASES_API_URL[] = "https://api.github.com/repos/elik745i/ESP-Pressure-Transducer/releases?per_page=10";
@@ -74,6 +74,8 @@ struct AppConfig {
   float sensorMaxVoltage;
   float sensorMaxPressureKPa;
   String sensorFilterPreset;
+  float buzzerAlarmMinPressureKPa;
+  float buzzerAlarmMaxPressureKPa;
   float buzzerAlarmThresholdKPa;
   bool buzzerEnabled;
   uint32_t publishIntervalSeconds;
@@ -154,6 +156,8 @@ enum class LedPattern {
 };
 
 void scheduleRestart(unsigned long delayMs);
+float clampFloat(float value, float low, float high);
+void publishState();
 
 String defaultDeviceName() {
   return String("pressure-") + String(ESP.getChipId(), HEX);
@@ -267,6 +271,8 @@ void setDefaults() {
   config.sensorMaxVoltage = 4.5f;
   config.sensorMaxPressureKPa = 1200.0f;
   config.sensorFilterPreset = "none";
+  config.buzzerAlarmMinPressureKPa = 0.0f;
+  config.buzzerAlarmMaxPressureKPa = 1100.0f;
   config.buzzerAlarmThresholdKPa = 1100.0f;
   config.buzzerEnabled = true;
   config.publishIntervalSeconds = 15;
@@ -287,6 +293,8 @@ bool saveConfig() {
   doc["sensorMaxVoltage"] = config.sensorMaxVoltage;
   doc["sensorMaxPressureKPa"] = config.sensorMaxPressureKPa;
   doc["sensorFilterPreset"] = config.sensorFilterPreset;
+  doc["buzzerAlarmMinPressureKPa"] = config.buzzerAlarmMinPressureKPa;
+  doc["buzzerAlarmMaxPressureKPa"] = config.buzzerAlarmMaxPressureKPa;
   doc["buzzerAlarmThresholdKPa"] = config.buzzerAlarmThresholdKPa;
   doc["buzzerEnabled"] = config.buzzerEnabled;
   doc["publishIntervalSeconds"] = config.publishIntervalSeconds;
@@ -337,6 +345,8 @@ bool loadConfig() {
   config.sensorMaxVoltage = doc["sensorMaxVoltage"] | config.sensorMaxVoltage;
   config.sensorMaxPressureKPa = doc["sensorMaxPressureKPa"] | config.sensorMaxPressureKPa;
   config.sensorFilterPreset = doc["sensorFilterPreset"] | config.sensorFilterPreset;
+  config.buzzerAlarmMinPressureKPa = doc["buzzerAlarmMinPressureKPa"] | config.buzzerAlarmMinPressureKPa;
+  config.buzzerAlarmMaxPressureKPa = doc["buzzerAlarmMaxPressureKPa"] | config.buzzerAlarmMaxPressureKPa;
   config.buzzerAlarmThresholdKPa = doc["buzzerAlarmThresholdKPa"] | config.buzzerAlarmThresholdKPa;
   config.buzzerEnabled = doc["buzzerEnabled"] | config.buzzerEnabled;
   config.publishIntervalSeconds = doc["publishIntervalSeconds"] | config.publishIntervalSeconds;
@@ -346,6 +356,14 @@ bool loadConfig() {
   config.oledTopRowMode = doc["oledTopRowMode"] | config.oledTopRowMode;
   config.oledBottomRowMode = doc["oledBottomRowMode"] | config.oledBottomRowMode;
   config.oledValueYOffset = doc["oledValueYOffset"] | config.oledValueYOffset;
+
+  if (doc["buzzerAlarmMinPressureKPa"].isNull() && doc["buzzerAlarmMaxPressureKPa"].isNull()) {
+    config.buzzerAlarmMinPressureKPa = 0.0f;
+    config.buzzerAlarmMaxPressureKPa = config.buzzerAlarmThresholdKPa;
+  }
+
+  config.buzzerAlarmMinPressureKPa = clampFloat(config.buzzerAlarmMinPressureKPa, 0.0f, config.sensorMaxPressureKPa);
+  config.buzzerAlarmMaxPressureKPa = clampFloat(config.buzzerAlarmMaxPressureKPa, config.buzzerAlarmMinPressureKPa, config.sensorMaxPressureKPa);
 
   if (!hasPersistentConfig) {
     config.deviceName = doc["deviceName"] | config.deviceName;
@@ -472,6 +490,30 @@ String stateTopic() {
 
 String availabilityTopic() {
   return config.mqttBaseTopic + "/availability";
+}
+
+float kPaToBar(float pressureKPa) {
+  return pressureKPa / 100.0f;
+}
+
+float barToKPa(float pressureBar) {
+  return pressureBar * 100.0f;
+}
+
+String alarmMinPressureStateTopic() {
+  return config.mqttBaseTopic + "/alarm_min_pressure/state";
+}
+
+String alarmMinPressureCommandTopic() {
+  return config.mqttBaseTopic + "/alarm_min_pressure/set";
+}
+
+String alarmMaxPressureStateTopic() {
+  return config.mqttBaseTopic + "/alarm_max_pressure/state";
+}
+
+String alarmMaxPressureCommandTopic() {
+  return config.mqttBaseTopic + "/alarm_max_pressure/set";
 }
 
 String uniqueIdBase() {
@@ -702,6 +744,10 @@ void fillDiscoveryDevice(JsonObject device) {
   device["mf"] = "DIY";
   device["mdl"] = "Wemos D1 mini pressure transducer";
   device["sw"] = FIRMWARE_VERSION;
+  const String configUrl = devicePageUrl();
+  if (!configUrl.isEmpty()) {
+    device["configuration_url"] = configUrl;
+  }
 }
 
 float clampFloat(float value, float low, float high) {
@@ -1128,25 +1174,41 @@ void mqttPublish(const String &topic, const String &payload, bool retained) {
   mqttClient.publish(topic.c_str(), payload.c_str(), retained);
 }
 
+bool saveRuntimeConfig() {
+  return savePersistentConfig() && saveConfig();
+}
+
+void publishAlarmSettings() {
+  if (!mqttClient.connected()) {
+    return;
+  }
+
+  mqttPublish(alarmMinPressureStateTopic(), String(kPaToBar(config.buzzerAlarmMinPressureKPa), 2), true);
+  mqttPublish(alarmMaxPressureStateTopic(), String(kPaToBar(config.buzzerAlarmMaxPressureKPa), 2), true);
+}
+
 void publishDiscovery() {
   if (!config.mqttDiscoveryEnabled || config.mqttDiscoveryPrefix.isEmpty()) {
     return;
   }
 
+  mqttPublish(config.mqttDiscoveryPrefix + "/sensor/" + uniqueIdBase() + "/pressure/config", "", true);
+
   JsonDocument pressureDoc;
-  pressureDoc["name"] = config.deviceName + " Pressure";
-  pressureDoc["uniq_id"] = uniqueIdBase() + "_pressure";
+  pressureDoc["name"] = "Pressure";
+  pressureDoc["uniq_id"] = uniqueIdBase() + "_pressure_bar";
   pressureDoc["stat_t"] = stateTopic();
   pressureDoc["avty_t"] = availabilityTopic();
   pressureDoc["unit_of_meas"] = "bar";
   pressureDoc["dev_cla"] = "pressure";
   pressureDoc["val_tpl"] = "{{ value_json.pressure_bar }}";
+  pressureDoc["sug_dsp_prc"] = 2;
   pressureDoc["exp_aft"] = config.publishIntervalSeconds * 3;
   fillDiscoveryDevice(pressureDoc["dev"].to<JsonObject>());
 
   String pressurePayload;
   serializeJson(pressureDoc, pressurePayload);
-  mqttPublish(config.mqttDiscoveryPrefix + "/sensor/" + uniqueIdBase() + "/pressure/config", pressurePayload, true);
+  mqttPublish(config.mqttDiscoveryPrefix + "/sensor/" + uniqueIdBase() + "/pressure_bar/config", pressurePayload, true);
 
   JsonDocument voltageDoc;
   voltageDoc["name"] = config.deviceName + " Sensor Voltage";
@@ -1178,7 +1240,83 @@ void publishDiscovery() {
   serializeJson(signalDoc, signalPayload);
   mqttPublish(config.mqttDiscoveryPrefix + "/sensor/" + uniqueIdBase() + "/wifi_rssi/config", signalPayload, true);
 
+  JsonDocument alarmMinDoc;
+  alarmMinDoc["name"] = "Min";
+  alarmMinDoc["uniq_id"] = uniqueIdBase() + "_alarm_min_pressure";
+  alarmMinDoc["stat_t"] = alarmMinPressureStateTopic();
+  alarmMinDoc["cmd_t"] = alarmMinPressureCommandTopic();
+  alarmMinDoc["avty_t"] = availabilityTopic();
+  alarmMinDoc["unit_of_meas"] = "bar";
+  alarmMinDoc["mode"] = "box";
+  alarmMinDoc["min"] = 0;
+  alarmMinDoc["max"] = serialized(String(kPaToBar(config.sensorMaxPressureKPa), 2));
+  alarmMinDoc["step"] = 0.01;
+  fillDiscoveryDevice(alarmMinDoc["dev"].to<JsonObject>());
+
+  String alarmMinPayload;
+  serializeJson(alarmMinDoc, alarmMinPayload);
+  mqttPublish(config.mqttDiscoveryPrefix + "/number/" + uniqueIdBase() + "/alarm_min_pressure/config", alarmMinPayload, true);
+
+  JsonDocument alarmMaxDoc;
+  alarmMaxDoc["name"] = "Max";
+  alarmMaxDoc["uniq_id"] = uniqueIdBase() + "_alarm_max_pressure";
+  alarmMaxDoc["stat_t"] = alarmMaxPressureStateTopic();
+  alarmMaxDoc["cmd_t"] = alarmMaxPressureCommandTopic();
+  alarmMaxDoc["avty_t"] = availabilityTopic();
+  alarmMaxDoc["unit_of_meas"] = "bar";
+  alarmMaxDoc["mode"] = "box";
+  alarmMaxDoc["min"] = 0;
+  alarmMaxDoc["max"] = serialized(String(kPaToBar(config.sensorMaxPressureKPa), 2));
+  alarmMaxDoc["step"] = 0.01;
+  fillDiscoveryDevice(alarmMaxDoc["dev"].to<JsonObject>());
+
+  String alarmMaxPayload;
+  serializeJson(alarmMaxDoc, alarmMaxPayload);
+  mqttPublish(config.mqttDiscoveryPrefix + "/number/" + uniqueIdBase() + "/alarm_max_pressure/config", alarmMaxPayload, true);
+
+  publishAlarmSettings();
   mqttDiscoveryPublished = true;
+}
+
+void handleMqttMessage(char *topic, byte *payload, unsigned int length) {
+  if (topic == nullptr || payload == nullptr) {
+    return;
+  }
+
+  String topicString(topic);
+  String payloadString;
+  payloadString.reserve(length);
+  for (unsigned int index = 0; index < length; ++index) {
+    payloadString += static_cast<char>(payload[index]);
+  }
+  payloadString.trim();
+  if (payloadString.isEmpty()) {
+    return;
+  }
+
+  char *endPtr = nullptr;
+  const float requestedValue = strtof(payloadString.c_str(), &endPtr);
+  if (endPtr == payloadString.c_str() || (endPtr != nullptr && *endPtr != '\0')) {
+    return;
+  }
+
+  const float requestedKPa = barToKPa(requestedValue);
+
+  if (topicString == alarmMinPressureCommandTopic()) {
+    config.buzzerAlarmMinPressureKPa = clampFloat(requestedKPa, 0.0f, config.buzzerAlarmMaxPressureKPa);
+  } else if (topicString == alarmMaxPressureCommandTopic()) {
+    config.buzzerAlarmMaxPressureKPa = clampFloat(requestedKPa, config.buzzerAlarmMinPressureKPa, config.sensorMaxPressureKPa);
+  } else {
+    return;
+  }
+
+  if (!saveRuntimeConfig()) {
+    return;
+  }
+
+  publishAlarmSettings();
+  publishState();
+  publishDiscovery();
 }
 
 bool connectMqtt() {
@@ -1187,12 +1325,15 @@ bool connectMqtt() {
   }
 
   mqttClient.setServer(config.mqttHost.c_str(), config.mqttPort);
+  mqttClient.setCallback(handleMqttMessage);
   const bool connected = config.mqttUser.isEmpty()
                              ? mqttClient.connect(mqttClientId().c_str(), availabilityTopic().c_str(), 0, true, "offline")
                              : mqttClient.connect(mqttClientId().c_str(), config.mqttUser.c_str(), config.mqttPassword.c_str(), availabilityTopic().c_str(), 0, true, "offline");
 
   if (connected) {
     mqttPublish(availabilityTopic(), "online", true);
+    mqttClient.subscribe(alarmMinPressureCommandTopic().c_str());
+    mqttClient.subscribe(alarmMaxPressureCommandTopic().c_str());
     publishDiscovery();
   }
 
@@ -1220,7 +1361,9 @@ void sampleSensor() {
   const float pressureKPa = clampFloat(normalized, 0.0f, 1.0f) * config.sensorMaxPressureKPa;
   sensorState.pressureKPa += alpha * (pressureKPa - sensorState.pressureKPa);
   sensorState.pressureBar = sensorState.pressureKPa / 100.0f;
-  sensorState.alarmActive = config.buzzerEnabled && sensorState.pressureKPa >= config.buzzerAlarmThresholdKPa;
+  sensorState.alarmActive = config.buzzerEnabled &&
+                            (sensorState.pressureKPa <= config.buzzerAlarmMinPressureKPa ||
+                             sensorState.pressureKPa >= config.buzzerAlarmMaxPressureKPa);
 }
 
 void publishState() {
@@ -1240,6 +1383,8 @@ void publishState() {
   doc["ip"] = localIpString();
   doc["ui_url"] = devicePageUrl();
   doc["alarm"] = sensorState.alarmActive;
+  doc["alarm_min_kpa"] = serialized(String(config.buzzerAlarmMinPressureKPa, 1));
+  doc["alarm_max_kpa"] = serialized(String(config.buzzerAlarmMaxPressureKPa, 1));
   doc["uptime_seconds"] = millis() / 1000;
 
   String payload;
@@ -1290,6 +1435,8 @@ void sendJsonConfig() {
   doc["sensorMaxVoltage"] = config.sensorMaxVoltage;
   doc["sensorMaxPressureKPa"] = config.sensorMaxPressureKPa;
   doc["sensorFilterPreset"] = config.sensorFilterPreset;
+  doc["buzzerAlarmMinPressureKPa"] = config.buzzerAlarmMinPressureKPa;
+  doc["buzzerAlarmMaxPressureKPa"] = config.buzzerAlarmMaxPressureKPa;
   doc["buzzerAlarmThresholdKPa"] = config.buzzerAlarmThresholdKPa;
   doc["buzzerEnabled"] = config.buzzerEnabled;
   doc["publishIntervalSeconds"] = config.publishIntervalSeconds;
@@ -1656,6 +1803,8 @@ bool updateConfigFromRequest() {
   config.sensorMaxVoltage = doc["sensorMaxVoltage"] | config.sensorMaxVoltage;
   config.sensorMaxPressureKPa = doc["sensorMaxPressureKPa"] | config.sensorMaxPressureKPa;
   config.sensorFilterPreset = String(static_cast<const char *>(doc["sensorFilterPreset"] | config.sensorFilterPreset.c_str()));
+  config.buzzerAlarmMinPressureKPa = doc["buzzerAlarmMinPressureKPa"] | config.buzzerAlarmMinPressureKPa;
+  config.buzzerAlarmMaxPressureKPa = doc["buzzerAlarmMaxPressureKPa"] | config.buzzerAlarmMaxPressureKPa;
   config.buzzerAlarmThresholdKPa = doc["buzzerAlarmThresholdKPa"] | config.buzzerAlarmThresholdKPa;
   config.buzzerEnabled = doc["buzzerEnabled"] | config.buzzerEnabled;
   config.publishIntervalSeconds = doc["publishIntervalSeconds"] | config.publishIntervalSeconds;
@@ -1720,6 +1869,21 @@ bool updateConfigFromRequest() {
     return false;
   }
 
+  if (config.buzzerAlarmMinPressureKPa < 0.0f || config.buzzerAlarmMaxPressureKPa < 0.0f) {
+    server.send(400, "application/json", "{\"error\":\"Alarm pressures must be zero or higher\"}");
+    return false;
+  }
+
+  if (config.buzzerAlarmMaxPressureKPa < config.buzzerAlarmMinPressureKPa) {
+    server.send(400, "application/json", "{\"error\":\"Alarm max pressure must be greater than or equal to alarm min pressure\"}");
+    return false;
+  }
+
+  if (config.buzzerAlarmMaxPressureKPa > config.sensorMaxPressureKPa) {
+    server.send(400, "application/json", "{\"error\":\"Alarm max pressure cannot exceed sensor max pressure\"}");
+    return false;
+  }
+
   if (config.sensorFilterPreset != "none" && config.sensorFilterPreset != "light" &&
       config.sensorFilterPreset != "soft" &&
       config.sensorFilterPreset != "hard" && config.sensorFilterPreset != "strong") {
@@ -1745,6 +1909,11 @@ void handleConfigPost() {
   }
 
   applyDisplaySettings();
+  if (mqttClient.connected()) {
+    publishAlarmSettings();
+    publishDiscovery();
+    publishState();
+  }
   beep(2000, 120);
   server.send(200, "application/json", "{\"ok\":true,\"message\":\"Saved. Device will restart.\"}");
   scheduleRestart(1200);

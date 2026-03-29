@@ -688,9 +688,14 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
               </label>
             </div>
             <div class="row">
-              <label>Alarm Threshold (kPa)
-                <input id="buzzerAlarmThresholdKPa" type="number" step="0.1">
+              <label>Alarm Min Pressure (kPa)
+                <input id="buzzerAlarmMinPressureKPa" type="number" min="0" step="0.1">
               </label>
+              <label>Alarm Max Pressure (kPa)
+                <input id="buzzerAlarmMaxPressureKPa" type="number" min="0" step="0.1">
+              </label>
+            </div>
+            <div class="row">
               <label class="check"><input id="buzzerEnabled" type="checkbox"> Enable buzzer alarm</label>
             </div>
             <div class="row">
@@ -804,7 +809,8 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
       "deviceName", "apSsid", "apPassword", "wifiSsid", "wifiPassword",
       "mqttHost", "mqttPort", "mqttUser", "mqttPassword", "mqttBaseTopic",
       "mqttDiscoveryPrefix", "otaBaseUrl", "sensorMinVoltage",
-      "sensorMaxVoltage", "sensorMaxPressureKPa", "buzzerAlarmThresholdKPa",
+      "sensorMaxVoltage", "sensorMaxPressureKPa", "buzzerAlarmMinPressureKPa",
+      "buzzerAlarmMaxPressureKPa",
       "sensorFilterPreset",
       "publishIntervalSeconds", "oledContrast", "oledPressureUnit",
       "oledTopRowMode", "oledBottomRowMode", "oledValueYOffset"
@@ -1053,7 +1059,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
       ["mqttPort", "publishIntervalSeconds"].forEach((id) => {
         payload[id] = Number(payload[id]);
       });
-      ["sensorMinVoltage", "sensorMaxVoltage", "sensorMaxPressureKPa", "buzzerAlarmThresholdKPa", "oledContrast", "oledValueYOffset"].forEach((id) => {
+      ["sensorMinVoltage", "sensorMaxVoltage", "sensorMaxPressureKPa", "buzzerAlarmMinPressureKPa", "buzzerAlarmMaxPressureKPa", "oledContrast", "oledValueYOffset"].forEach((id) => {
         payload[id] = Number(payload[id]);
       });
       checkboxes.forEach((id) => {
