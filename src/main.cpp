@@ -24,6 +24,7 @@ constexpr char GITHUB_FIRMWARE_ASSET_NAME[] = "firmware.bin";
 constexpr char GITHUB_FILESYSTEM_ASSET_NAME[] = "littlefs.bin";
 constexpr char OTA_DIRECT_FIRMWARE_PATH[] = "firmware.bin";
 constexpr uint8_t BUZZER_PIN = D5;
+constexpr uint8_t TOUCH_SENSOR_PIN = D6;
 constexpr uint8_t STATUS_LED_PIN = LED_BUILTIN;
 constexpr uint16_t DNS_PORT = 53;
 constexpr float ADC_PIN_MAX_VOLTAGE = 3.2f;
@@ -130,6 +131,8 @@ bool localFirmwareUploadStarted = false;
 bool localFirmwareUploadHadData = false;
 String localFirmwareUploadError = "";
 String localFirmwareUploadFilename = "";
+bool touchSensorPressed = false;
+unsigned long touchSensorDebounceDeadlineMs = 0;
 const uint16_t *buzzerMelodyFrequencies = nullptr;
 const uint16_t *buzzerMelodyDurations = nullptr;
 size_t buzzerMelodyCount = 0;
@@ -158,6 +161,7 @@ enum class LedPattern {
 void scheduleRestart(unsigned long delayMs);
 float clampFloat(float value, float low, float high);
 void publishState();
+void drawDisplay();
 
 String defaultDeviceName() {
   return String("pressure-") + String(ESP.getChipId(), HEX);
@@ -837,6 +841,27 @@ void playWifiDisconnectedMelody() {
 
 void playMqttConnectedMelody() {
   playMelody(MQTT_CONNECTED_MELODY_FREQUENCIES, MQTT_CONNECTED_MELODY_DURATIONS, 4, true);
+}
+
+void handleTouchSensor(unsigned long now) {
+  if (static_cast<long>(now - touchSensorDebounceDeadlineMs) < 0) {
+    return;
+  }
+
+  const bool isPressed = digitalRead(TOUCH_SENSOR_PIN) == HIGH;
+  if (isPressed == touchSensorPressed) {
+    return;
+  }
+
+  touchSensorPressed = isPressed;
+  touchSensorDebounceDeadlineMs = now + 150;
+  if (!isPressed) {
+    return;
+  }
+
+  beep(2600, 70);
+  config.oledPressureUnit = (config.oledPressureUnit == "psi") ? "bar" : "psi";
+  drawDisplay();
 }
 
 bool hasBinExtension(const String &filename) {
@@ -1962,6 +1987,7 @@ void configureWebServer() {
 void setupApp() {
   pinMode(BUZZER_PIN, OUTPUT);
   digitalWrite(BUZZER_PIN, LOW);
+  pinMode(TOUCH_SENSOR_PIN, INPUT);
   pinMode(STATUS_LED_PIN, OUTPUT);
   setStatusLed(false);
 
@@ -2005,6 +2031,7 @@ void loopApp() {
 
   const unsigned long now = millis();
   serviceBuzzer(now);
+  handleTouchSensor(now);
   const bool wifiConnected = WiFi.isConnected();
   const bool mqttConnected = mqttClient.connected();
   updateStatusLed(now);

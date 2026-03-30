@@ -3,6 +3,7 @@
 PlatformIO project for a Wemos D1 mini (ESP8266) pressure monitor with:
 
 - 0.96 inch I2C OLED status display
+- TTP223 touch sensor support for quick OLED unit switching
 - web configuration page with in-firmware fallback if LittleFS content is missing
 - Wi-Fi station mode plus fallback configuration access point
 - captive portal behavior for easier AP setup on phones and laptops
@@ -19,6 +20,7 @@ Board and connections used by this project:
 - OLED SCL -> D1 / GPIO5
 - OLED SDA -> D2 / GPIO4
 - Buzzer -> D5 / GPIO14
+- TTP223 touch output -> D6 / GPIO12
 - Pressure sensor output -> 10K series resistor -> A0
 - A0 -> 33K resistor -> GND
 
@@ -113,6 +115,15 @@ Set:
 
 After saving, the device restarts automatically.
 
+## OLED Touch Control
+
+If a TTP223 touch sensor is connected to `D6 / GPIO12`, a short touch will:
+
+- play a short confirmation beep on the buzzer
+- switch the OLED pressure unit between `bar` and `psi`
+
+This gives a quick way to change units directly on the device without opening the web UI.
+
 ## Firmware Updates
 
 The Firmware tab supports two update methods:
@@ -197,4 +208,5 @@ The repository already includes a GitHub Actions workflow that builds the Platfo
 - The web UI is compiled into firmware and can also be stored separately in LittleFS as [data/index.html](data/index.html).
 - The Firmware tab can remember the last open tab in the browser and reopen it after refresh.
 - The OLED shows live pressure, Wi-Fi state, and MQTT state.
+- A TTP223 touch sensor on `D6 / GPIO12` can toggle the OLED between `bar` and `psi` with a short beep.
 - The built-in LED uses different blink patterns for boot, AP-only mode, Wi-Fi connection attempts, Wi-Fi connected, MQTT connected, and restart pending.
