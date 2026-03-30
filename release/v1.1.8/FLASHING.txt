@@ -1,0 +1,12 @@
+ESP Pressure Transducer v1.1.8
+
+Flash offsets for ESP8266 4M1M / Wemos D1 mini:
+- firmware.bin -> 0x000000
+- littlefs.bin -> 0x300000
+
+Notes:
+- Flash firmware.bin for normal firmware updates.
+- Flash littlefs.bin too only when you intentionally want to refresh the filesystem image.
+- Wi-Fi and MQTT credentials are stored in persistent EEPROM-backed storage.
+- Added TTP223 touch sensor support on D6 / GPIO12.
+- A short touch now beeps and toggles the OLED pressure unit between bar and psi.
