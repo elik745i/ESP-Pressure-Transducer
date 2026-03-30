@@ -15,7 +15,7 @@
 namespace {
 
 constexpr char CONFIG_PATH[] = "/config.json";
-constexpr char FIRMWARE_VERSION[] = "v1.1.8";
+constexpr char FIRMWARE_VERSION[] = "v1.1.9";
 constexpr char GITHUB_OWNER[] = "elik745i";
 constexpr char GITHUB_REPO[] = "ESP-Pressure-Transducer";
 constexpr char GITHUB_RELEASES_API_URL[] = "https://api.github.com/repos/elik745i/ESP-Pressure-Transducer/releases?per_page=10";
@@ -30,11 +30,15 @@ constexpr uint16_t DNS_PORT = 53;
 constexpr float ADC_PIN_MAX_VOLTAGE = 3.2f;
 constexpr float DIVIDER_R1_KOHM = 10.0f;
 constexpr float DIVIDER_R2_KOHM = 33.0f;
+constexpr float ALARM_HYSTERESIS_KPA = 2.0f;
 constexpr unsigned long SENSOR_SAMPLE_INTERVAL_MS = 250;
 constexpr unsigned long DISPLAY_INTERVAL_MS = 500;
 constexpr unsigned long WIFI_RECONNECT_INTERVAL_MS = 15000;
 constexpr unsigned long MQTT_RECONNECT_INTERVAL_MS = 10000;
 constexpr unsigned long BOOT_INDICATION_MS = 4000;
+constexpr unsigned long TOUCH_SENSOR_DEBOUNCE_MS = 50;
+constexpr unsigned long TOUCH_SENSOR_STARTUP_IGNORE_MS = 1500;
+constexpr unsigned long TOUCH_SENSOR_RETRIGGER_MS = 700;
 constexpr size_t EEPROM_SIZE_BYTES = 1024;
 constexpr uint32_t PERSISTENT_CONFIG_MAGIC = 0x50545231UL;
 constexpr uint16_t PERSISTENT_CONFIG_VERSION = 1;
@@ -79,9 +83,11 @@ struct AppConfig {
   float buzzerAlarmMaxPressureKPa;
   float buzzerAlarmThresholdKPa;
   bool buzzerEnabled;
+  uint8_t buzzerVolumePercent;
   uint32_t publishIntervalSeconds;
   uint8_t oledContrast;
   bool oledFlip;
+  bool touchEnabled;
   String oledPressureUnit;
   String oledTopRowMode;
   String oledBottomRowMode;
@@ -132,7 +138,12 @@ bool localFirmwareUploadHadData = false;
 String localFirmwareUploadError = "";
 String localFirmwareUploadFilename = "";
 bool touchSensorPressed = false;
-unsigned long touchSensorDebounceDeadlineMs = 0;
+bool touchSensorRawPressed = false;
+unsigned long touchSensorStateChangedAtMs = 0;
+unsigned long touchSensorIgnoreUntilMs = 0;
+unsigned long lastTouchTriggerMs = 0;
+bool lowPressureAlarmActive = false;
+bool highPressureAlarmActive = false;
 const uint16_t *buzzerMelodyFrequencies = nullptr;
 const uint16_t *buzzerMelodyDurations = nullptr;
 size_t buzzerMelodyCount = 0;
@@ -279,9 +290,11 @@ void setDefaults() {
   config.buzzerAlarmMaxPressureKPa = 1100.0f;
   config.buzzerAlarmThresholdKPa = 1100.0f;
   config.buzzerEnabled = true;
+  config.buzzerVolumePercent = 50;
   config.publishIntervalSeconds = 15;
   config.oledContrast = 200;
   config.oledFlip = false;
+  config.touchEnabled = true;
   config.oledPressureUnit = "bar";
   config.oledTopRowMode = "ip";
   config.oledBottomRowMode = "mqtt";
@@ -301,9 +314,11 @@ bool saveConfig() {
   doc["buzzerAlarmMaxPressureKPa"] = config.buzzerAlarmMaxPressureKPa;
   doc["buzzerAlarmThresholdKPa"] = config.buzzerAlarmThresholdKPa;
   doc["buzzerEnabled"] = config.buzzerEnabled;
+  doc["buzzerVolumePercent"] = config.buzzerVolumePercent;
   doc["publishIntervalSeconds"] = config.publishIntervalSeconds;
   doc["oledContrast"] = config.oledContrast;
   doc["oledFlip"] = config.oledFlip;
+  doc["touchEnabled"] = config.touchEnabled;
   doc["oledPressureUnit"] = config.oledPressureUnit;
   doc["oledTopRowMode"] = config.oledTopRowMode;
   doc["oledBottomRowMode"] = config.oledBottomRowMode;
@@ -353,9 +368,11 @@ bool loadConfig() {
   config.buzzerAlarmMaxPressureKPa = doc["buzzerAlarmMaxPressureKPa"] | config.buzzerAlarmMaxPressureKPa;
   config.buzzerAlarmThresholdKPa = doc["buzzerAlarmThresholdKPa"] | config.buzzerAlarmThresholdKPa;
   config.buzzerEnabled = doc["buzzerEnabled"] | config.buzzerEnabled;
+  config.buzzerVolumePercent = doc["buzzerVolumePercent"] | config.buzzerVolumePercent;
   config.publishIntervalSeconds = doc["publishIntervalSeconds"] | config.publishIntervalSeconds;
   config.oledContrast = doc["oledContrast"] | config.oledContrast;
   config.oledFlip = doc["oledFlip"] | config.oledFlip;
+  config.touchEnabled = doc["touchEnabled"] | config.touchEnabled;
   config.oledPressureUnit = doc["oledPressureUnit"] | config.oledPressureUnit;
   config.oledTopRowMode = doc["oledTopRowMode"] | config.oledTopRowMode;
   config.oledBottomRowMode = doc["oledBottomRowMode"] | config.oledBottomRowMode;
@@ -368,6 +385,7 @@ bool loadConfig() {
 
   config.buzzerAlarmMinPressureKPa = clampFloat(config.buzzerAlarmMinPressureKPa, 0.0f, config.sensorMaxPressureKPa);
   config.buzzerAlarmMaxPressureKPa = clampFloat(config.buzzerAlarmMaxPressureKPa, config.buzzerAlarmMinPressureKPa, config.sensorMaxPressureKPa);
+  config.buzzerVolumePercent = static_cast<uint8_t>(clampFloat(config.buzzerVolumePercent, 0.0f, 100.0f));
 
   if (!hasPersistentConfig) {
     config.deviceName = doc["deviceName"] | config.deviceName;
@@ -520,6 +538,22 @@ String alarmMaxPressureCommandTopic() {
   return config.mqttBaseTopic + "/alarm_max_pressure/set";
 }
 
+String buzzerVolumeStateTopic() {
+  return config.mqttBaseTopic + "/buzzer_volume/state";
+}
+
+String buzzerVolumeCommandTopic() {
+  return config.mqttBaseTopic + "/buzzer_volume/set";
+}
+
+String touchEnabledStateTopic() {
+  return config.mqttBaseTopic + "/touch_enabled/state";
+}
+
+String touchEnabledCommandTopic() {
+  return config.mqttBaseTopic + "/touch_enabled/set";
+}
+
 String uniqueIdBase() {
   String id = config.deviceName;
   id.replace(" ", "_");
@@ -534,6 +568,27 @@ String githubUserAgent() {
 void otaDebug(const String &message) {
   Serial.print(F("[OTA] "));
   Serial.println(message);
+}
+
+uint16_t buzzerDutyCycle() {
+  const float normalized = clampFloat(static_cast<float>(config.buzzerVolumePercent), 0.0f, 100.0f) / 100.0f;
+  return static_cast<uint16_t>(normalized * 1023.0f);
+}
+
+void stopBuzzerOutput() {
+  analogWrite(BUZZER_PIN, 0);
+  digitalWrite(BUZZER_PIN, LOW);
+}
+
+void startBuzzerOutput(uint16_t frequency) {
+  const uint16_t dutyCycle = buzzerDutyCycle();
+  if (dutyCycle == 0) {
+    stopBuzzerOutput();
+    return;
+  }
+
+  analogWriteFreq(frequency);
+  analogWrite(BUZZER_PIN, dutyCycle);
 }
 
 String githubReleaseAssetUrl(const String &tagName, const char *assetName) {
@@ -776,7 +831,7 @@ void startMelody(const uint16_t *frequencies, const uint16_t *durations, size_t 
   buzzerMelodyActive = noteCount > 0;
   buzzerTonePhase = false;
   buzzerPhaseEndsAtMs = 0;
-  noTone(BUZZER_PIN);
+  stopBuzzerOutput();
 }
 
 void serviceBuzzer(unsigned long now) {
@@ -788,7 +843,7 @@ void serviceBuzzer(unsigned long now) {
   }
 
   if (buzzerTonePhase) {
-    noTone(BUZZER_PIN);
+    stopBuzzerOutput();
     buzzerTonePhase = false;
     ++buzzerMelodyIndex;
     buzzerPhaseEndsAtMs = now + 30;
@@ -797,20 +852,20 @@ void serviceBuzzer(unsigned long now) {
 
   if (buzzerMelodyIndex >= buzzerMelodyCount) {
     buzzerMelodyActive = false;
-    noTone(BUZZER_PIN);
+    stopBuzzerOutput();
     return;
   }
 
   const uint16_t frequency = buzzerMelodyFrequencies[buzzerMelodyIndex];
   const uint16_t duration = buzzerMelodyDurations[buzzerMelodyIndex];
   if (frequency == 0 || duration == 0) {
-    noTone(BUZZER_PIN);
+    stopBuzzerOutput();
     ++buzzerMelodyIndex;
     buzzerPhaseEndsAtMs = now + duration;
     return;
   }
 
-  tone(BUZZER_PIN, frequency, duration);
+  startBuzzerOutput(frequency);
   buzzerTonePhase = true;
   buzzerPhaseEndsAtMs = now + duration;
 }
@@ -843,25 +898,69 @@ void playMqttConnectedMelody() {
   playMelody(MQTT_CONNECTED_MELODY_FREQUENCIES, MQTT_CONNECTED_MELODY_DURATIONS, 4, true);
 }
 
+void updateAlarmState() {
+  const bool lowAlarmEnabled = config.buzzerAlarmMinPressureKPa > 0.0f;
+  const float lowAlarmClearPoint = config.buzzerAlarmMinPressureKPa + ALARM_HYSTERESIS_KPA;
+  if (!lowAlarmEnabled) {
+    lowPressureAlarmActive = false;
+  } else if (!lowPressureAlarmActive && sensorState.pressureKPa < config.buzzerAlarmMinPressureKPa) {
+    lowPressureAlarmActive = true;
+  } else if (lowPressureAlarmActive && sensorState.pressureKPa > lowAlarmClearPoint) {
+    lowPressureAlarmActive = false;
+  }
+
+  const float highAlarmClearPoint = clampFloat(
+      config.buzzerAlarmMaxPressureKPa - ALARM_HYSTERESIS_KPA,
+      0.0f,
+      config.sensorMaxPressureKPa);
+  if (!highPressureAlarmActive && sensorState.pressureKPa > config.buzzerAlarmMaxPressureKPa) {
+    highPressureAlarmActive = true;
+  } else if (highPressureAlarmActive && sensorState.pressureKPa < highAlarmClearPoint) {
+    highPressureAlarmActive = false;
+  }
+
+  sensorState.alarmActive = config.buzzerEnabled && (lowPressureAlarmActive || highPressureAlarmActive);
+}
+
 void handleTouchSensor(unsigned long now) {
-  if (static_cast<long>(now - touchSensorDebounceDeadlineMs) < 0) {
-    return;
-  }
-
   const bool isPressed = digitalRead(TOUCH_SENSOR_PIN) == HIGH;
-  if (isPressed == touchSensorPressed) {
+  if (!config.touchEnabled) {
+    touchSensorRawPressed = isPressed;
+    touchSensorPressed = isPressed;
+    touchSensorStateChangedAtMs = now;
     return;
   }
 
-  touchSensorPressed = isPressed;
-  touchSensorDebounceDeadlineMs = now + 150;
-  if (!isPressed) {
+  if (static_cast<long>(now - touchSensorIgnoreUntilMs) < 0) {
     return;
   }
+
+  if (isPressed != touchSensorRawPressed) {
+    touchSensorRawPressed = isPressed;
+    touchSensorStateChangedAtMs = now;
+  }
+
+  if (touchSensorRawPressed == touchSensorPressed) {
+    return;
+  }
+
+  if (now - touchSensorStateChangedAtMs < TOUCH_SENSOR_DEBOUNCE_MS) {
+    return;
+  }
+
+  touchSensorPressed = touchSensorRawPressed;
+  if (!touchSensorPressed) {
+    return;
+  }
+
+  if (now - lastTouchTriggerMs < TOUCH_SENSOR_RETRIGGER_MS) {
+    return;
+  }
+  lastTouchTriggerMs = now;
 
   beep(2600, 70);
   config.oledPressureUnit = (config.oledPressureUnit == "psi") ? "bar" : "psi";
-  drawDisplay();
+  lastDisplayMs = 0;
 }
 
 bool hasBinExtension(const String &filename) {
@@ -1210,6 +1309,8 @@ void publishAlarmSettings() {
 
   mqttPublish(alarmMinPressureStateTopic(), String(kPaToBar(config.buzzerAlarmMinPressureKPa), 2), true);
   mqttPublish(alarmMaxPressureStateTopic(), String(kPaToBar(config.buzzerAlarmMaxPressureKPa), 2), true);
+  mqttPublish(buzzerVolumeStateTopic(), String(config.buzzerVolumePercent), true);
+  mqttPublish(touchEnabledStateTopic(), config.touchEnabled ? "1" : "0", true);
 }
 
 void publishDiscovery() {
@@ -1299,6 +1400,37 @@ void publishDiscovery() {
   serializeJson(alarmMaxDoc, alarmMaxPayload);
   mqttPublish(config.mqttDiscoveryPrefix + "/number/" + uniqueIdBase() + "/alarm_max_pressure/config", alarmMaxPayload, true);
 
+  JsonDocument volumeDoc;
+  volumeDoc["name"] = "Buzzer Volume";
+  volumeDoc["uniq_id"] = uniqueIdBase() + "_buzzer_volume";
+  volumeDoc["stat_t"] = buzzerVolumeStateTopic();
+  volumeDoc["cmd_t"] = buzzerVolumeCommandTopic();
+  volumeDoc["avty_t"] = availabilityTopic();
+  volumeDoc["unit_of_meas"] = "%";
+  volumeDoc["mode"] = "slider";
+  volumeDoc["min"] = 0;
+  volumeDoc["max"] = 100;
+  volumeDoc["step"] = 1;
+  fillDiscoveryDevice(volumeDoc["dev"].to<JsonObject>());
+
+  String volumePayload;
+  serializeJson(volumeDoc, volumePayload);
+  mqttPublish(config.mqttDiscoveryPrefix + "/number/" + uniqueIdBase() + "/buzzer_volume/config", volumePayload, true);
+
+  JsonDocument touchDoc;
+  touchDoc["name"] = "Touch Sensor";
+  touchDoc["uniq_id"] = uniqueIdBase() + "_touch_enabled";
+  touchDoc["stat_t"] = touchEnabledStateTopic();
+  touchDoc["cmd_t"] = touchEnabledCommandTopic();
+  touchDoc["avty_t"] = availabilityTopic();
+  touchDoc["pl_on"] = "1";
+  touchDoc["pl_off"] = "0";
+  fillDiscoveryDevice(touchDoc["dev"].to<JsonObject>());
+
+  String touchPayload;
+  serializeJson(touchDoc, touchPayload);
+  mqttPublish(config.mqttDiscoveryPrefix + "/switch/" + uniqueIdBase() + "/touch_enabled/config", touchPayload, true);
+
   publishAlarmSettings();
   mqttDiscoveryPublished = true;
 }
@@ -1325,12 +1457,16 @@ void handleMqttMessage(char *topic, byte *payload, unsigned int length) {
     return;
   }
 
-  const float requestedKPa = barToKPa(requestedValue);
-
   if (topicString == alarmMinPressureCommandTopic()) {
+    const float requestedKPa = barToKPa(requestedValue);
     config.buzzerAlarmMinPressureKPa = clampFloat(requestedKPa, 0.0f, config.buzzerAlarmMaxPressureKPa);
   } else if (topicString == alarmMaxPressureCommandTopic()) {
+    const float requestedKPa = barToKPa(requestedValue);
     config.buzzerAlarmMaxPressureKPa = clampFloat(requestedKPa, config.buzzerAlarmMinPressureKPa, config.sensorMaxPressureKPa);
+  } else if (topicString == buzzerVolumeCommandTopic()) {
+    config.buzzerVolumePercent = static_cast<uint8_t>(clampFloat(requestedValue, 0.0f, 100.0f));
+  } else if (topicString == touchEnabledCommandTopic()) {
+    config.touchEnabled = requestedValue >= 0.5f;
   } else {
     return;
   }
@@ -1359,6 +1495,8 @@ bool connectMqtt() {
     mqttPublish(availabilityTopic(), "online", true);
     mqttClient.subscribe(alarmMinPressureCommandTopic().c_str());
     mqttClient.subscribe(alarmMaxPressureCommandTopic().c_str());
+    mqttClient.subscribe(buzzerVolumeCommandTopic().c_str());
+    mqttClient.subscribe(touchEnabledCommandTopic().c_str());
     publishDiscovery();
   }
 
@@ -1386,9 +1524,7 @@ void sampleSensor() {
   const float pressureKPa = clampFloat(normalized, 0.0f, 1.0f) * config.sensorMaxPressureKPa;
   sensorState.pressureKPa += alpha * (pressureKPa - sensorState.pressureKPa);
   sensorState.pressureBar = sensorState.pressureKPa / 100.0f;
-  sensorState.alarmActive = config.buzzerEnabled &&
-                            (sensorState.pressureKPa <= config.buzzerAlarmMinPressureKPa ||
-                             sensorState.pressureKPa >= config.buzzerAlarmMaxPressureKPa);
+  updateAlarmState();
 }
 
 void publishState() {
@@ -1410,6 +1546,10 @@ void publishState() {
   doc["alarm"] = sensorState.alarmActive;
   doc["alarm_min_kpa"] = serialized(String(config.buzzerAlarmMinPressureKPa, 1));
   doc["alarm_max_kpa"] = serialized(String(config.buzzerAlarmMaxPressureKPa, 1));
+  doc["alarm_low_active"] = lowPressureAlarmActive;
+  doc["alarm_high_active"] = highPressureAlarmActive;
+  doc["buzzer_volume_percent"] = config.buzzerVolumePercent;
+  doc["touch_enabled"] = config.touchEnabled;
   doc["uptime_seconds"] = millis() / 1000;
 
   String payload;
@@ -1464,9 +1604,11 @@ void sendJsonConfig() {
   doc["buzzerAlarmMaxPressureKPa"] = config.buzzerAlarmMaxPressureKPa;
   doc["buzzerAlarmThresholdKPa"] = config.buzzerAlarmThresholdKPa;
   doc["buzzerEnabled"] = config.buzzerEnabled;
+  doc["buzzerVolumePercent"] = config.buzzerVolumePercent;
   doc["publishIntervalSeconds"] = config.publishIntervalSeconds;
   doc["oledContrast"] = config.oledContrast;
   doc["oledFlip"] = config.oledFlip;
+  doc["touchEnabled"] = config.touchEnabled;
   doc["oledPressureUnit"] = config.oledPressureUnit;
   doc["oledTopRowMode"] = config.oledTopRowMode;
   doc["oledBottomRowMode"] = config.oledBottomRowMode;
@@ -1495,6 +1637,10 @@ void sendStatus() {
   doc["pressureKPa"] = serialized(String(sensorState.pressureKPa, 1));
   doc["pressureBar"] = serialized(String(sensorState.pressureBar, 2));
   doc["alarmActive"] = sensorState.alarmActive;
+  doc["alarmLowActive"] = lowPressureAlarmActive;
+  doc["alarmHighActive"] = highPressureAlarmActive;
+  doc["buzzerVolumePercent"] = config.buzzerVolumePercent;
+  doc["touchEnabled"] = config.touchEnabled;
   doc["uptimeSeconds"] = millis() / 1000;
 
   String payload;
@@ -1832,9 +1978,11 @@ bool updateConfigFromRequest() {
   config.buzzerAlarmMaxPressureKPa = doc["buzzerAlarmMaxPressureKPa"] | config.buzzerAlarmMaxPressureKPa;
   config.buzzerAlarmThresholdKPa = doc["buzzerAlarmThresholdKPa"] | config.buzzerAlarmThresholdKPa;
   config.buzzerEnabled = doc["buzzerEnabled"] | config.buzzerEnabled;
+  config.buzzerVolumePercent = doc["buzzerVolumePercent"] | config.buzzerVolumePercent;
   config.publishIntervalSeconds = doc["publishIntervalSeconds"] | config.publishIntervalSeconds;
   config.oledContrast = doc["oledContrast"] | config.oledContrast;
   config.oledFlip = doc["oledFlip"] | config.oledFlip;
+  config.touchEnabled = doc["touchEnabled"] | config.touchEnabled;
   config.oledPressureUnit = String(static_cast<const char *>(doc["oledPressureUnit"] | config.oledPressureUnit.c_str()));
   config.oledTopRowMode = String(static_cast<const char *>(doc["oledTopRowMode"] | config.oledTopRowMode.c_str()));
   config.oledBottomRowMode = String(static_cast<const char *>(doc["oledBottomRowMode"] | config.oledBottomRowMode.c_str()));
@@ -1866,6 +2014,10 @@ bool updateConfigFromRequest() {
 
   if (config.oledContrast > 255) {
     config.oledContrast = 255;
+  }
+
+  if (config.buzzerVolumePercent > 100) {
+    config.buzzerVolumePercent = 100;
   }
 
   if (config.oledValueYOffset < -12) {
@@ -1986,8 +2138,13 @@ void configureWebServer() {
 
 void setupApp() {
   pinMode(BUZZER_PIN, OUTPUT);
-  digitalWrite(BUZZER_PIN, LOW);
+  analogWriteRange(1023);
+  stopBuzzerOutput();
   pinMode(TOUCH_SENSOR_PIN, INPUT);
+  touchSensorRawPressed = digitalRead(TOUCH_SENSOR_PIN) == HIGH;
+  touchSensorPressed = touchSensorRawPressed;
+  touchSensorStateChangedAtMs = millis();
+  touchSensorIgnoreUntilMs = millis() + TOUCH_SENSOR_STARTUP_IGNORE_MS;
   pinMode(STATUS_LED_PIN, OUTPUT);
   setStatusLed(false);
 

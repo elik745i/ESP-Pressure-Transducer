@@ -697,6 +697,10 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
             </div>
             <div class="row">
               <label class="check"><input id="buzzerEnabled" type="checkbox"> Enable buzzer alarm</label>
+              <label class="check"><input id="touchEnabled" type="checkbox"> Enable touch sensor</label>
+              <label>Buzzer Volume (%)
+                <input id="buzzerVolumePercent" type="number" min="0" max="100" step="1">
+              </label>
             </div>
             <div class="row">
               <label>Sensor Filter
@@ -810,13 +814,13 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
       "mqttHost", "mqttPort", "mqttUser", "mqttPassword", "mqttBaseTopic",
       "mqttDiscoveryPrefix", "otaBaseUrl", "sensorMinVoltage",
       "sensorMaxVoltage", "sensorMaxPressureKPa", "buzzerAlarmMinPressureKPa",
-      "buzzerAlarmMaxPressureKPa",
+      "buzzerAlarmMaxPressureKPa", "buzzerVolumePercent",
       "sensorFilterPreset",
       "publishIntervalSeconds", "oledContrast", "oledPressureUnit",
       "oledTopRowMode", "oledBottomRowMode", "oledValueYOffset"
     ];
 
-    const checkboxes = ["mqttEnabled", "mqttDiscoveryEnabled", "buzzerEnabled", "oledFlip"];
+    const checkboxes = ["mqttEnabled", "mqttDiscoveryEnabled", "buzzerEnabled", "touchEnabled", "oledFlip"];
     const tabButtons = Array.from(document.querySelectorAll(".tab-button"));
     const tabPanels = Array.from(document.querySelectorAll(".tab-panel"));
     const wifiNetworkList = document.getElementById("wifiNetworkList");
@@ -1059,7 +1063,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
       ["mqttPort", "publishIntervalSeconds"].forEach((id) => {
         payload[id] = Number(payload[id]);
       });
-      ["sensorMinVoltage", "sensorMaxVoltage", "sensorMaxPressureKPa", "buzzerAlarmMinPressureKPa", "buzzerAlarmMaxPressureKPa", "oledContrast", "oledValueYOffset"].forEach((id) => {
+      ["sensorMinVoltage", "sensorMaxVoltage", "sensorMaxPressureKPa", "buzzerAlarmMinPressureKPa", "buzzerAlarmMaxPressureKPa", "buzzerVolumePercent", "oledContrast", "oledValueYOffset"].forEach((id) => {
         payload[id] = Number(payload[id]);
       });
       checkboxes.forEach((id) => {

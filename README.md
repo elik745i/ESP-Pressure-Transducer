@@ -9,6 +9,8 @@ PlatformIO project for a Wemos D1 mini (ESP8266) pressure monitor with:
 - captive portal behavior for easier AP setup on phones and laptops
 - MQTT publishing for Home Assistant
 - buzzer alarm window with configurable Min and Max limits
+- buzzer volume control in the web UI and over MQTT
+- touch sensor enable / disable control in the web UI and over MQTT
 - Home Assistant MQTT discovery controls for Min / Max alarm settings in bar
 - Home Assistant device metadata with a direct LAN configuration page link
 
@@ -124,6 +126,8 @@ If a TTP223 touch sensor is connected to `D6 / GPIO12`, a short touch will:
 
 This gives a quick way to change units directly on the device without opening the web UI.
 
+The touch sensor can also be disabled entirely from the web UI or over MQTT.
+
 ## Firmware Updates
 
 The Firmware tab supports two update methods:
@@ -182,6 +186,8 @@ Home Assistant discovery includes:
 
 - pressure sensor exposed in `bar`
 - `Min` and `Max` number controls for the buzzer alarm window
+- `Buzzer Volume` number control in percent
+- `Touch Sensor` switch to enable or disable touch input
 - a device `configuration_url` that points to the device's LAN page when Wi-Fi is connected
 
 ## GitHub Setup
@@ -209,4 +215,7 @@ The repository already includes a GitHub Actions workflow that builds the Platfo
 - The Firmware tab can remember the last open tab in the browser and reopen it after refresh.
 - The OLED shows live pressure, Wi-Fi state, and MQTT state.
 - A TTP223 touch sensor on `D6 / GPIO12` can toggle the OLED between `bar` and `psi` with a short beep.
+- Buzzer volume is adjustable from `0` to `100%` and is retained in device configuration.
+- Touch sensor enable / disable is retained in device configuration and available over MQTT.
+- The alarm logic now uses hysteresis and reports low-side and high-side alarm activity separately in the status payload.
 - The built-in LED uses different blink patterns for boot, AP-only mode, Wi-Fi connection attempts, Wi-Fi connected, MQTT connected, and restart pending.
